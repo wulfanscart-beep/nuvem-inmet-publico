@@ -1,0 +1,136 @@
+import { batchKey, readBatch } from './batches.js';
+
+import { defaultFields, fieldPositions, fields } from './fields.js';
+import { packedKey, readPackedStation, stationCode } from './packed.js';
+const allFields = fields.map(({ name }) => name);
+
+function response(body, type, status = 200, headers = {}) {
+  return new Response(body, {
+    status,
+    headers: {
+      'Content-Type': type,
+      'Cache-Control': 'no-store',
+      'Access-Control-Allow-Origin': '*',
+      ...headers,
+    },
+  });
+}
+
+function json(body, status = 200, headers) {
+  return response(JSON.stringify(body), 'application/json; charset=utf-8', status, headers);
+}
+
+function isUtcDay(day) {
+  try {
+    batchKey(day);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function csvCell(value) {
+  if (value === null) return '';
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function observationResponse(station, day, hours, format, selected) {
+  const rows = Array.from({ length: 24 }, (_, hour) => {
+    const row = hours.get(hour);
+    const values = {
+      station_code: station,
+      timestamp_utc: `${day}T${String(hour).padStart(2, '0')}:00:00Z`,
+    };
+    for (const name of selected) values[name] = row?.[fieldPositions.get(name)] ?? null;
+    values.recorded = row !== undefined;
+    return values;
+  });
+  if (format === 'csv') {
+    const observationColumns = ['station_code', 'timestamp_utc', ...selected, 'recorded'];
+    const lines = rows.map(row => observationColumns.map(column => csvCell(row[column])).join(','));
+    return response(`${observationColumns.join(',')}\n${lines.join('\n')}\n`, 'text/csv; charset=utf-8');
+  }
+  return json(rows);
+}
+
+async function legacyHours(bucket, day, station) {
+  const batch = await readBatch(bucket, day);
+  if (batch === null) return null;
+  const hours = new Map();
+  for (const row of batch) {
+    if (!Array.isArray(row) || row.length !== 4) throw new TypeError('Invalid stored observation');
+    if (row[0] !== station) continue;
+    const [, hour, temperature, humidity] = row;
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23 || hours.has(hour)
+        || (temperature !== null && typeof temperature !== 'string')
+        || (humidity !== null && typeof humidity !== 'string')) {
+      throw new TypeError('Invalid stored observation');
+    }
+    hours.set(hour, row.slice(1));
+  }
+  return hours;
+}
+
+async function storedHours(env, day, station) {
+  if (!env?.INMET_DAYS) return legacyHours(env?.INMET_BATCHES, day, station);
+  const bytes = await env.INMET_DAYS.get(packedKey(day), 'arrayBuffer');
+  return bytes === null ? null : readPackedStation(bytes, day, station);
+}
+
+export async function handleRequest(request, env) {
+  const url = new URL(request.url);
+  if (!['/health', '/v1/observations', '/v1/fields'].includes(url.pathname)) {
+    return json({ error: 'route_not_found' }, 404);
+  }
+  if (request.method !== 'GET') {
+    return json({ error: 'method_not_allowed' }, 405, { Allow: 'GET' });
+  }
+
+  if (url.pathname === '/v1/fields') return json(fields);
+
+  if (url.pathname === '/health') {
+    try {
+      if (env?.INMET_DAYS) await env.INMET_DAYS.get('health');
+      else await env?.INMET_BATCHES.head(batchKey(new Date().toISOString().slice(0, 10)));
+      if (!env?.INMET_DAYS && !env?.INMET_BATCHES) throw new Error('Missing storage binding');
+      return json({ status: 'ok' });
+    } catch {
+      return json({ error: 'storage_unavailable' }, 503);
+    }
+  }
+
+  const stations = url.searchParams.getAll('station');
+  const dates = url.searchParams.getAll('date');
+  const formats = url.searchParams.getAll('format');
+  const station = stations[0];
+  const day = dates[0];
+  const format = formats[0] ?? 'json';
+  if (stations.length !== 1 || station !== station.trim() || !stationCode.test(station)) {
+    return json({ error: 'invalid_station' }, 400);
+  }
+  if (dates.length !== 1 || !isUtcDay(day)) {
+    return json({ error: 'invalid_date' }, 400);
+  }
+  if (formats.length > 1 || (format !== 'json' && format !== 'csv')) {
+    return json({ error: 'invalid_format' }, 400);
+  }
+
+  const selections = url.searchParams.getAll('fields');
+  const requested = selections[0];
+  const selected = requested === 'all' ? allFields : requested === undefined ? defaultFields : requested.split(',');
+  if (selections.length > 1 || selected.length > fields.length
+      || new Set(selected).size !== selected.length || selected.some(name => !fieldPositions.has(name))) {
+    return json({ error: 'invalid_fields' }, 400);
+  }
+
+  let hours;
+  try {
+    hours = await storedHours(env, day, station);
+  } catch {
+    return json({ error: 'storage_unavailable' }, 503);
+  }
+  if (hours === null) return json({ error: 'day_not_found' }, 404);
+  if (!hours.size) return json({ error: 'station_not_found' }, 404);
+  return observationResponse(station, day, hours, format, selected);
+}

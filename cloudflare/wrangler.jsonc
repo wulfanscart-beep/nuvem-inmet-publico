@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nuvem-inmet-exemplo",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "triggers": {
+    "crons": [
+      "0 8 * * *"
+    ]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "INMET_DAYS"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "nuvem-inmet-exemplo-diario",
+      "binding": "INMET_COLLECTOR",
+      "class_name": "InmetDailyCollection",
+      "concurrency": {
+        "limit": 1
+      }
+    }
+  ]
+}

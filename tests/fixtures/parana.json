@@ -1,0 +1,14 @@
+{
+  "description": "Amostra sintética em coordenadas aproximadas de cidades do Paraná. Não contém observações do INMET.",
+  "stations": [
+    ["TEST-CTBA", "-25.43", "-49.27", "2024-02-01T00:00:00Z"],
+    ["TEST-LDNA", "-23.31", "-51.16", "2024-02-01T00:00:00Z"]
+  ],
+  "observations": [
+    ["TEST-CTBA", "2024-02-28T23:00:00Z", "-2.7", "0"],
+    ["TEST-CTBA", "2024-02-29T00:00:00Z", "23.71234567890123", "41.125"],
+    ["TEST-CTBA", "2024-02-29T02:00:00Z", null, null],
+    ["TEST-CTBA", "2024-02-29T03:00:00Z", "0", null],
+    ["TEST-LDNA", "2024-02-29T00:00:00Z", null, "100"]
+  ]
+}

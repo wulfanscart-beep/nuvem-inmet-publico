@@ -1,0 +1,19 @@
+[
+  {"name":"temperature_c","source":"TEM_INS","unit":"°C","csv":["TEMPERATURA DO AR BULBO SECO HORARIA C","TEMPERATURA DO AR BULBO SECO HORARIO C"]},
+  {"name":"relative_humidity_percent","source":"UMD_INS","unit":"%","csv":["UMIDADE RELATIVA DO AR HORARIA","UMIDADE RELATIVA DO AR HORARIO"]},
+  {"name":"wind_speed_m_s","source":"VEN_VEL","unit":"m/s","csv":["VENTO VELOCIDADE HORARIA M S"]},
+  {"name":"wind_gust_m_s","source":"VEN_RAJ","unit":"m/s","csv":["VENTO RAJADA MAXIMA M S"]},
+  {"name":"wind_direction_deg","source":"VEN_DIR","unit":"°","csv":["VENTO DIRECAO HORARIA GR GR","VENTO DIRECAO HORARIA GR"]},
+  {"name":"precipitation_mm","source":"CHUVA","unit":"mm","csv":["PRECIPITACAO TOTAL HORARIO MM","PRECIPITACAO TOTAL HORARIA MM"]},
+  {"name":"pressure_hpa","source":"PRE_INS","unit":"hPa","csv":["PRESSAO ATMOSFERICA AO NIVEL DA ESTACAO HORARIA MB"]},
+  {"name":"pressure_max_hpa","source":"PRE_MAX","unit":"hPa","csv":["PRESSAO ATMOSFERICA MAX NA HORA ANT AUT MB"]},
+  {"name":"pressure_min_hpa","source":"PRE_MIN","unit":"hPa","csv":["PRESSAO ATMOSFERICA MIN NA HORA ANT AUT MB"]},
+  {"name":"solar_radiation_kj_m2","source":"RAD_GLO","unit":"kJ/m²","csv":["RADIACAO GLOBAL KJ M2"]},
+  {"name":"dew_point_c","source":"PTO_INS","unit":"°C","csv":["TEMPERATURA DO PONTO DE ORVALHO C"]},
+  {"name":"dew_point_max_c","source":"PTO_MAX","unit":"°C","csv":["TEMPERATURA ORVALHO MAX NA HORA ANT AUT C"]},
+  {"name":"dew_point_min_c","source":"PTO_MIN","unit":"°C","csv":["TEMPERATURA ORVALHO MIN NA HORA ANT AUT C"]},
+  {"name":"temperature_max_c","source":"TEM_MAX","unit":"°C","csv":["TEMPERATURA MAXIMA NA HORA ANT AUT C"]},
+  {"name":"temperature_min_c","source":"TEM_MIN","unit":"°C","csv":["TEMPERATURA MINIMA NA HORA ANT AUT C"]},
+  {"name":"relative_humidity_max_percent","source":"UMD_MAX","unit":"%","csv":["UMIDADE REL MAX NA HORA ANT AUT"]},
+  {"name":"relative_humidity_min_percent","source":"UMD_MIN","unit":"%","csv":["UMIDADE REL MIN NA HORA ANT AUT"]}
+]

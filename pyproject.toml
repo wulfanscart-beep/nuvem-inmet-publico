@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nuvem-inmet"
+version = "0.1.0"
+description = "Acervo binário local e sincronização de observações horárias do INMET"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+bigquery = ["google-cloud-bigquery>=3.26,<4"]
+benchmark = ["pyarrow>=21,<25"]
+parquet = ["pyarrow>=21,<25"]
+
+[project.scripts]
+nuvem-inmet = "nuvem_inmet.cli:main"
+
+[tool.setuptools]
+packages = [
+    "nuvem_inmet",
+    "nuvem_inmet.collectors",
+    "nuvem_inmet.validation",
+    "nuvem_inmet.codec",
+    "nuvem_inmet.storage",
+    "nuvem_inmet.query",
+]
+package-dir = {nuvem_inmet = "src"}

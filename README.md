@@ -207,3 +207,13 @@ no Workers KV. [API e operação](cloudflare/README.md)
 - [Formato binário e códigos de ausência](docs/formato-binario.md)
 - [Arquitetura, fontes e integridade](docs/arquitetura.md)
 - [Benchmark e comparação com CSV, JSON e Parquet](docs/desempenho.md)
+
+## Licença
+
+O código e a documentação do Nuvem-INMET são distribuídos sob a licença MIT. Ela
+permite usar, adaptar e redistribuir o código, inclusive para fins comerciais.
+Preserve o aviso de direitos autorais e o texto da licença nas cópias ou em
+partes substanciais do código. [Texto da licença](LICENSE)
+
+Os dados do INMET, os conjuntos de dados de terceiros e as dependências
+seguem os termos das respectivas fontes e projetos.

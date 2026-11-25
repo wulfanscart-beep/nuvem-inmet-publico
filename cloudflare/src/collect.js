@@ -66,12 +66,16 @@ export async function collectPackedDay(params, kv, step, fetcher = fetch) {
   const groups = Array.from({ length: partitions }, () => []);
   let offset = 0;
   let parts = 0;
+  let source;
   while (offset !== null) {
     const position = offset;
     const part = await step.do("ler parte " + (++parts), storageRetry, async () => {
-      const raw = await kv.get(rawKey, "arrayBuffer");
-      if (!raw || raw.byteLength > maxSourceBytes) throw new Error("Lote de origem indisponível.");
-      const { text, next } = readJsonSlice(new Uint8Array(raw), position);
+      if (!source) {
+        const raw = await kv.get(rawKey, "arrayBuffer");
+        if (!raw || raw.byteLength > maxSourceBytes) throw new Error("Lote de origem indisponível.");
+        source = new Uint8Array(raw);
+      }
+      const { text, next } = readJsonSlice(source, position);
       return { next, groups: groupSlice(text, day) };
     });
     for (const [partition, rows] of Object.entries(part.groups)) {
@@ -79,6 +83,7 @@ export async function collectPackedDay(params, kv, step, fetcher = fetch) {
     }
     offset = part.next;
   }
+  source = undefined;
 
   const buffers = [];
   for (const [partition, slices] of groups.entries()) {

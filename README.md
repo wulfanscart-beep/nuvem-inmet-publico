@@ -21,8 +21,7 @@ python -m unittest discover -s tests -v
 ```
 
 O acervo fica em `./data` por padrão. Use `NUVEM_INMET_DATA` ou
-`nuvem-inmet --data-dir CAMINHO ...` para mudar o diretório. As variáveis de
-configuração estão em [.env.example](.env.example).
+`nuvem-inmet --data-dir CAMINHO ...` para mudar o diretório.
 
 ## Brasil inteiro com atualização diária
 

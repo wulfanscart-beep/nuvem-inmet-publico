@@ -12,8 +12,10 @@ const step = { do: (_name, ...args) => args.at(-1)() };
 class Store {
   items = new Map();
   writes = [];
+  reads = [];
 
   async get(key, type) {
+    this.reads.push(key);
     const value = this.items.get(key);
     if (!value) return null;
     return type === "stream" ? new Blob([value]).stream() : value;
@@ -48,6 +50,7 @@ test("preenche um dia com uma busca, compacta por estação e devolve somente as
   assert.equal(result.status, "stored");
   assert.equal(result.stations, 450);
   assert.ok(result.parts > 1);
+  assert.equal(kv.reads.filter(key => key === stagedKey(day)).length, 1);
   assert.deepEqual(kv.writes, [stagedKey(day), packedKey(day)]);
   assert.deepEqual(await collectPackedDay({ day }, kv, step, fetcher), { day, status: "already_stored" });
   assert.equal(calls, 1);

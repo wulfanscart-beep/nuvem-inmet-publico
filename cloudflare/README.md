@@ -38,8 +38,10 @@ são ao nível da estação. A radiação horária está em kJ/m².
 
 O agendamento cria uma instância com o dia como identificador. Se o dia já
 está publicado, a instância encerra. O Workflow mantém a resposta original
-por 12 horas em uma chave temporária do KV. Cada etapa lê e normaliza uma
-fatia de até 64 KiB do JSON. Os registros são agrupados, os dados de cada
+por 12 horas em uma chave temporária do KV. O JSON é carregado uma vez
+por execução contínua e normalizado em fatias de até 64 KiB. Uma retomada
+pode reler o original para processar uma fatia pendente. O buffer é liberado
+antes da compactação. Os registros são agrupados, os dados de cada
 estação são compactados em gzip e o resultado é publicado em uma única
 chave `observations/v2/AAAA-MM-DD.bin`. A leitura faz um acesso ao KV e usa
 o índice para descompactar somente a estação consultada.

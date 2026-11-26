@@ -2,6 +2,10 @@ import { previousUtcDay } from "./index.js";
 import { bdmepPrefix, packedPrefix, stagedBdmepKey } from "./packed.js";
 
 export const mailboxState = "bdmep/v1/pending";
+export const resumableBdmepSteps = {
+  confirmar_pedido: "confirmar o pedido no BDMEP",
+  baixar_arquivo: "receber arquivo oficial no KV",
+};
 const recoveryWindowDays = 30;
 const millisecondsPerDay = 86_400_000;
 const millisecondsPerHour = 3_600_000;
@@ -16,7 +20,19 @@ export async function scheduleCollection(scheduledTime, kv, collector) {
     return null;
   }
   const slot = new Date(slotTime).toISOString().slice(0, 13);
-  if (await kv.get(mailboxState)) return { slot, status: "awaiting_portal" };
+  const pending = await kv.get(mailboxState, "json");
+  if (pending) {
+    if (pending.id && Object.values(resumableBdmepSteps).includes(pending.resumeFrom)
+        && pending.restartedSlot !== slot && pending.expires > Date.now() / 1000 + 60) {
+      const instance = await collector.get(pending.id);
+      if ((await instance.status()).status === "errored") {
+        await kv.put(mailboxState, JSON.stringify({ ...pending, restartedSlot: slot }), { expiration: pending.expires });
+        await instance.restart({ from: { name: pending.resumeFrom } });
+        return { slot, day: pending.day, id: pending.id, status: "resumed" };
+      }
+    }
+    return { slot, status: "awaiting_portal" };
+  }
   const today = slot.slice(0, 10);
   const eligibleTime = slotTime - previousDayRelease;
   const days = Array.from({ length: recoveryWindowDays }, (_, offset) =>

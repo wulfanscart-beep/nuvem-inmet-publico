@@ -23,6 +23,7 @@ const requests = [];
 let sourceOpen = false;
 let formCalls = 0;
 let downloads = 0;
+let deliveryBlocked = false;
 const runtime = new Miniflare(convertV4MiniflareOptions({ workers: [
   { ...base, name: "consulta-local", scriptPath: ".wrangler/dist/worker.js", kvNamespaces,
     workflows: { INMET_BDMEP: { ...binding, scriptName: "portal-local" } } },
@@ -41,7 +42,7 @@ const runtime = new Miniflare(convertV4MiniflareOptions({ workers: [
       }
       assert.equal(u.hostname, "bdmep.inmet.gov.br");
       downloads++;
-      if(downloads===1)return new Response("temporary",{status:503});
+      if(deliveryBlocked || downloads===1)return new Response("temporary",{status:503});
       return new Response(csv, { headers: { "Content-Type": "text/csv" } });
     } },
   { ...base, name: "navegador-local",
@@ -85,5 +86,20 @@ try {
     const rows=await result.json(); assert.equal(rows[19].temperature_c,"21.90");assert.equal(rows[19].wind_gust_m_s,"14.0");
   }
   assert.equal(formCalls,5); assert.equal(downloads,2); assert.equal(requests.filter(host=>host==="apitempo.inmet.gov.br").length,0);
-  console.log(JSON.stringify({failedWindow:first.s.status,nextWindow:second.s.status,stations:2,formCalls,downloads,duplicateSubmissions:0,officialApiCalls:0}));
+  await kv.delete(bdmepKey(day));
+  deliveryBlocked = true;
+  await fire("2026-11-26T19:00:00Z");
+  const third = await flow.get("bdmep-janela-2026-11-26T19");
+  await third.sendEvent({type:"confirmation",payload:{url:"https://bdmep.inmet.gov.br/confirmacao/fixture"}});
+  await third.sendEvent({type:"download",payload:{url:"https://bdmep.inmet.gov.br/download/fixture"}});
+  const failedDelivery=await waitFor(third.id,s=>s.status==="errored");
+  assert.equal(await kv.get(bdmepKey(day)),null);
+  const callsBeforeRecovery = formCalls;
+  deliveryBlocked = false;
+  await fire("2026-11-27T00:00:00Z");
+  const recovery = await waitFor(third.id,s=>s.status==="complete");
+  assert.equal(formCalls,callsBeforeRecovery);
+  assert.equal(recovery.s.output.stations,2);
+  assert.equal(await kv.get(mailboxState),null);
+  console.log(JSON.stringify({failedWindow:first.s.status,nextWindow:second.s.status,deliveryFailure:failedDelivery.s.status,recoveredDelivery:recovery.s.status,stations:2,formCalls,downloads,duplicateSubmissions:0,officialApiCalls:0}));
 } finally { await runtime.dispose(); }

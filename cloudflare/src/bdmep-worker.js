@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import PostalMime from "postal-mime";
 import { indexBdmepArchive, maximumArchiveBytes } from "./bdmep-archive.js";
 import { bdmepFormScript } from "./bdmep-form.js";
-import { mailboxState } from "./schedule.js";
+import { mailboxState, resumableBdmepSteps } from "./schedule.js";
 import { bdmepKey, packedKey, stagedBdmepKey } from "./packed.js";
 
 const bdmep = "https://bdmep.inmet.gov.br";
@@ -179,7 +179,8 @@ export class InmetBdmepCollection extends WorkflowEntrypoint {
       await step.do("reservar recebimento do BDMEP", noRetry, async () => {
         const active = await env.INMET_DAYS.get(mailboxState, "json");
         if (active?.id && active.id !== instance) throw new Error("Já existe uma solicitação aberta no BDMEP.");
-        await env.INMET_DAYS.put(mailboxState, JSON.stringify({ id: instance, day }), { expirationTtl: 2 * 86_400 });
+        const expires = Math.floor(Date.now() / 1000) + 2 * 86_400;
+        await env.INMET_DAYS.put(mailboxState, JSON.stringify({ id: instance, day, expires }), { expiration: expires });
       });
       phase = "formulario";
       const submit = async () => {
@@ -238,6 +239,17 @@ export class InmetBdmepCollection extends WorkflowEntrypoint {
       return { ...result, sourceBytes: archive.bytes };
     } catch (error) {
       console.error({ event: "bdmep_coleta", day, instance, phase, status: "falha", error: logMessage(error) });
+      const resumeFrom = resumableBdmepSteps[phase];
+      if (resumeFrom) {
+        await step.do("registrar retomada da entrega do BDMEP", noRetry, async () => {
+          const pending = await env.INMET_DAYS.get(mailboxState, "json");
+          if (pending?.id !== instance) return;
+          const now = Math.floor(Date.now() / 1000);
+          const expires = pending.expires ?? now + 86_400;
+          if (expires <= now + 60) return;
+          await env.INMET_DAYS.put(mailboxState, JSON.stringify({ ...pending, expires, resumeFrom }), { expiration: expires });
+        });
+      }
       throw error;
     }
   }

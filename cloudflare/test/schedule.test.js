@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bdmepKey, packedKey, stagedBdmepKey } from "../src/packed.js";
-import { mailboxState, scheduleCollection } from "../src/schedule.js";
+import { mailboxState, resumableBdmepSteps, scheduleCollection } from "../src/schedule.js";
 
 const hour = 3_600_000;
 const first = Date.parse("2026-11-25T13:00:00Z");
@@ -14,7 +14,8 @@ function setup() {
   const ids = new Set();
   const jobs = [];
   const kv = {
-    get: async key => entries.has(key) ? "open" : null,
+    get: async (key, type) => entries.has(key) ? type === "json" ? entries.get(key) : "open" : null,
+    put: async (key, value) => entries.set(key, JSON.parse(value)),
     getWithMetadata: async key => ({
       value: entries.has(key) ? new Response("archive").body : null,
       metadata: entries.get(key),
@@ -108,4 +109,28 @@ test("erros da criação do Workflow continuam visíveis no gatilho", async () =
   await assert.rejects(scheduleCollection(morning, kv, {
     createBatch: async () => ({ created: [], errors: [{ code: 10400 }] }),
   }), /Falha ao agendar BDMEP: 10400/);
+});
+
+test("retoma a entrega com erro na próxima janela sem refazer o pedido nem renovar sua validade", async () => {
+  const { run, entries, collector, jobs } = setup();
+  const expires = Math.floor(Date.now() / 1000) + 86_400;
+  const active = { id: "pedido-confirmado", day: previous, expires, resumeFrom: resumableBdmepSteps.baixar_arquivo };
+  entries.set(mailboxState, active);
+  const restarts = [];
+  let status = "waiting";
+  collector.get = async id => {
+    assert.equal(id, active.id);
+    return { status: async () => ({ status }), restart: async options => restarts.push(options) };
+  };
+  assert.equal((await run(morning)).status, "awaiting_portal");
+  assert.equal(restarts.length, 0);
+  status = "errored";
+  assert.equal((await run(morning)).status, "resumed");
+  assert.deepEqual(restarts, [{ from: { name: resumableBdmepSteps.baixar_arquivo } }]);
+  assert.equal((await run(morning + 5_000)).status, "awaiting_portal");
+  assert.equal(restarts.length, 1);
+  assert.equal((await run(morning + 5 * hour)).status, "resumed");
+  assert.equal(restarts.length, 2);
+  assert.equal(entries.get(mailboxState).expires, expires);
+  assert.equal(jobs.length, 0);
 });

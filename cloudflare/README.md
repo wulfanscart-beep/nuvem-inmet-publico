@@ -78,6 +78,9 @@ e-mail para evitar um segundo pedido. O Cloudflare Email Routing entrega os e-ma
 Worker e o Workflow confirma o pedido e baixa o arquivo oficial da fila.
 A confirmação e o download admitem três novas tentativas com esperas
 de cinco, dez e vinte minutos. Cada retomada usa o mesmo pedido recebido.
+Se essas tentativas se esgotarem, a próxima janela de cinco horas retoma
+a etapa com erro na mesma instância, conservando o recibo e o formulário
+já concluído. A validade original do recebimento não é prorrogada.
 O arquivo fica temporariamente no KV. Em cada execução do indexador,
 uma leitura carrega o ZIP, e cada bloco é validado e compactado no mesmo
 passo. Se o Workflow for retomado, ele pode reler o ZIP para continuar

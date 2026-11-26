@@ -82,7 +82,7 @@ function measurement(value, field, code) {
     throw new Error(`Valor inválido em ${field} para ${code}.`);
   }
   const text = value.trim();
-  if (text === "") return null;
+  if (text === "" || text.toLowerCase() === "null") return null;
   const parts = DECIMAL.exec(text);
   if (!parts) {
     throw new Error(`Valor decimal inválido em ${field} para ${code}.`);
@@ -99,7 +99,7 @@ function measurement(value, field, code) {
     throw new Error(`Expoente fora do intervalo suportado em ${field} para ${code}.`);
   }
   const significant = digits.slice(firstDigit).replace(/0+$/, "");
-  if (sign === "-" && order === 4 && significant === "9999") return null;
+  if (order === 4 && significant === "9999") return null;
   if (field.startsWith("UMD_") && (sign === "-" || order > 3 || (order === 3 && significant !== "1"))) {
     throw new Error(`Umidade relativa fora de 0 a 100% para ${code}.`);
   }
@@ -126,10 +126,14 @@ export async function fetchInmetDay(day, { fetcher = fetch, extended = false } =
   return normalizeInmetRows(await readBody(response), day, { extended });
 }
 
-export function normalizeInmetRows(text, day, { extended, sort = true }) {
+export function normalizeInmetRows(text, day, options) {
+  return normalizeInmetInputs(parseRows(text), day, options);
+}
+
+export function normalizeInmetInputs(inputs, day, { extended, sort = true }) {
   const variables = extended ? fields : fields.slice(0, 2);
   const observations = new Map();
-  for (const row of parseRows(text)) {
+  for (const row of inputs) {
     if (row === null || typeof row !== "object" || Array.isArray(row)) {
       throw new Error("Observação inválida na resposta do INMET.");
     }

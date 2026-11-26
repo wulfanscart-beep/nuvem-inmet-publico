@@ -7,7 +7,7 @@
   "preview_urls": false,
   "triggers": {
     "crons": [
-      "0 8 * * *"
+      "0 * * * *"
     ]
   },
   "observability": {
@@ -28,12 +28,18 @@
   ],
   "workflows": [
     {
-      "name": "nuvem-inmet-exemplo-diario",
+      "name": "nuvem-inmet-exemplo-daily",
       "binding": "INMET_COLLECTOR",
       "class_name": "InmetDailyCollection",
       "concurrency": {
         "limit": 1
       }
+    },
+    {
+      "name": "nuvem-inmet-exemplo-bdmep",
+      "binding": "INMET_BDMEP",
+      "class_name": "InmetBdmepCollection",
+      "script_name": "nuvem-inmet-exemplo-bdmep"
     }
   ]
 }

@@ -1,7 +1,7 @@
 import { batchKey, readBatch } from './batches.js';
 
 import { defaultFields, fieldPositions, fields } from './fields.js';
-import { packedKey, readPackedStation, stationCode } from './packed.js';
+import { bdmepKey, packedKey, portalKey, readPackedStation, stationCode, wis2Key } from './packed.js';
 const allFields = fields.map(({ name }) => name);
 
 function response(body, type, status = 200, headers = {}) {
@@ -35,7 +35,7 @@ function csvCell(value) {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-function observationResponse(station, day, hours, format, selected) {
+function observationResponse(station, day, hours, format, selected, headers) {
   const rows = Array.from({ length: 24 }, (_, hour) => {
     const row = hours.get(hour);
     const values = {
@@ -49,9 +49,9 @@ function observationResponse(station, day, hours, format, selected) {
   if (format === 'csv') {
     const observationColumns = ['station_code', 'timestamp_utc', ...selected, 'recorded'];
     const lines = rows.map(row => observationColumns.map(column => csvCell(row[column])).join(','));
-    return response(`${observationColumns.join(',')}\n${lines.join('\n')}\n`, 'text/csv; charset=utf-8');
+    return response(`${observationColumns.join(',')}\n${lines.join('\n')}\n`, 'text/csv; charset=utf-8', 200, headers);
   }
-  return json(rows);
+  return json(rows, 200, headers);
 }
 
 async function legacyHours(bucket, day, station) {
@@ -76,6 +76,15 @@ async function storedHours(env, day, station) {
   if (!env?.INMET_DAYS) return legacyHours(env?.INMET_BATCHES, day, station);
   const bytes = await env.INMET_DAYS.get(packedKey(day), 'arrayBuffer');
   return bytes === null ? null : readPackedStation(bytes, day, station);
+}
+
+function coverageHeaders(source, hours, coverage = 'partial') {
+  return {
+    'X-INMET-Source': source,
+    'X-INMET-Coverage': coverage,
+    'X-INMET-Observed-Hours': String(hours.size),
+    'Access-Control-Expose-Headers': 'X-INMET-Source, X-INMET-Coverage, X-INMET-Observed-Hours',
+  };
 }
 
 export async function handleRequest(request, env) {
@@ -125,12 +134,46 @@ export async function handleRequest(request, env) {
   }
 
   let hours;
+  let headers;
+  let officialDayExists = false;
   try {
     hours = await storedHours(env, day, station);
+    if (!hours?.size && env?.INMET_DAYS) {
+      const portal = await env.INMET_DAYS.get(portalKey(day, station), 'arrayBuffer');
+      if (portal !== null) {
+        hours = await readPackedStation(portal, day, station);
+        headers = coverageHeaders('portal', hours, hours.size === 24 ? 'complete' : 'partial');
+      }
+    }
+    const fromPortal = headers?.['X-INMET-Source'] === 'portal';
+    if (env?.INMET_DAYS && (!hours?.size || (fromPortal && hours.size < 24))) {
+      const bdmep = await env.INMET_DAYS.get(bdmepKey(day), 'arrayBuffer');
+      if (bdmep !== null) {
+        officialDayExists = true;
+        const reports = await readPackedStation(bdmep, day, station);
+        if (reports.size > 0) {
+          if (fromPortal) {
+            for (const [hour, row] of reports) {
+              if (!hours.has(hour)) hours.set(hour, row);
+            }
+          } else {
+            hours = reports;
+          }
+          headers = coverageHeaders(fromPortal ? 'portal' : 'bdmep', hours, hours.size === 24 ? 'complete' : 'partial');
+        }
+      }
+    }
+    if (hours === null && env?.INMET_DAYS && url.searchParams.get('fallback') === 'wis2') {
+      const fallback = await env.INMET_DAYS.get(wis2Key(day), 'arrayBuffer');
+      if (fallback !== null) {
+        hours = await readPackedStation(fallback, day, station);
+        headers = coverageHeaders('wis2', hours);
+      }
+    }
   } catch {
     return json({ error: 'storage_unavailable' }, 503);
   }
-  if (hours === null) return json({ error: 'day_not_found' }, 404);
+  if (hours === null) return json({ error: officialDayExists ? 'station_not_found' : 'day_not_found' }, 404);
   if (!hours.size) return json({ error: 'station_not_found' }, 404);
-  return observationResponse(station, day, hours, format, selected);
+  return observationResponse(station, day, hours, format, selected, headers);
 }

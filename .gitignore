@@ -19,3 +19,5 @@ node_modules/
 .dev.vars
 .dev.vars.*
 /cloudflare/wrangler.local.jsonc
+
+/cloudflare/bdmep.wrangler.local.jsonc

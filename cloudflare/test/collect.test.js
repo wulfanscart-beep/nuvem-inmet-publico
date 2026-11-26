@@ -80,6 +80,7 @@ test("não publica lista truncada, resposta da fonte indisponível ou duplicata 
   const duplicates = [row, { ...row, VEN_VEL: "5" }];
   for (const fetcher of [
     async () => new Response("sem fonte", { status: 503 }),
+    async () => Response.json([]),
     async () => new Response("[" + JSON.stringify(row) + ",]"),
     async () => Response.json(duplicates),
   ]) {
@@ -87,4 +88,76 @@ test("não publica lista truncada, resposta da fonte indisponível ou duplicata 
     assert.equal(kv.items.has(packedKey(day)), false);
   }
   assert.throws(() => readJsonSlice(new TextEncoder().encode(JSON.stringify([row]) + "{}"), 0));
+});
+
+test("conserva medições válidas quando só alguns sensores do INMET têm dados", async () => {
+  const kv = new Store();
+  const data = [
+    { ...observation("A807", "1100"), UMD_INS: " Null ", UMD_MIN: 9999 },
+    { ...observation("A807", "1200"), TEM_INS: "-9999.0", UMD_INS: "55", CHUVA: " " },
+    { ...observation("A807", "1300"), UMD_INS: "+9.999e3", UMD_MIN: undefined },
+  ];
+  await collectPackedDay({ day }, kv, step, async () => Response.json(data));
+
+  const url = "https://worker.test/v1/observations?station=A807&date=" + day
+    + "&fields=temperature_c,relative_humidity_percent,relative_humidity_min_percent,precipitation_mm";
+  const request = suffix => handleRequest(new Request(url + suffix), { INMET_DAYS: kv });
+  const response = await request("");
+  assert.equal(response.status, 200);
+  const records = await response.json();
+  assert.equal(records.length, 24);
+  assert.deepEqual(records[11], {
+    station_code: "A807", timestamp_utc: day + "T11:00:00Z",
+    temperature_c: "22.4", relative_humidity_percent: null,
+    relative_humidity_min_percent: null, precipitation_mm: "0", recorded: true,
+  });
+  assert.equal(records[10].recorded, false);
+  assert.equal(records[12].temperature_c, null);
+  assert.equal(records[12].relative_humidity_percent, "55");
+  assert.equal(records[12].precipitation_mm, null);
+  assert.equal(records[13].relative_humidity_percent, null);
+  const csv = (await (await request("&format=csv")).text()).split("\n");
+  assert.equal(csv[12], "A807," + day + "T11:00:00Z,22.4,,,0,true");
+});
+
+test("mantém um dia sem medições fora da API e permite nova coleta da mesma data", async () => {
+  const kv = new Store();
+  const fetchEmpty = async () => Response.json([
+    { CD_ESTACAO: "A807", DT_MEDICAO: day, HR_MEDICAO: "0000", TEM_INS: null, UMD_INS: "-9999" },
+  ]);
+  await assert.rejects(collectPackedDay({ day }, kv, step, fetchEmpty), /dia sem medições/);
+  assert.equal(kv.items.has(packedKey(day)), false);
+
+  const request = () => handleRequest(
+    new Request("https://worker.test/v1/observations?station=A807&date=" + day),
+    { INMET_DAYS: kv },
+  );
+  const absent = await request();
+  assert.equal(absent.status, 404);
+  assert.deepEqual(await absent.json(), { error: "day_not_found" });
+
+  const complete = await collectPackedDay({ day }, kv, step,
+    async () => Response.json([observation("A807", "2300")]));
+  assert.equal(complete.status, "stored");
+  assert.equal((await (await request()).json())[23].temperature_c, "22.4");
+});
+
+test("repete a etapa de obtenção após indisponibilidade do INMET", async () => {
+  const kv = new Store();
+  const retryStep = {
+    async do(name, ...args) {
+      const run = args.at(-1);
+      if (name !== "receber INMET") return run();
+      assert.deepEqual(args[0].retries, { limit: 2, delay: "2 minutes", backoff: "exponential" });
+      try { return await run(); }
+      catch { return run(); }
+    },
+  };
+  let calls = 0;
+  const fetcher = async () => ++calls === 1
+    ? new Response("indisponível", { status: 520 })
+    : Response.json([observation("A807", "0000")]);
+
+  assert.equal((await collectPackedDay({ day }, kv, retryStep, fetcher)).status, "stored");
+  assert.equal(calls, 2);
 });

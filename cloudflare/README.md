@@ -1,9 +1,9 @@
 # Nuvem-INMET no Cloudflare
 
-Um Worker recebe consultas e dispara a coleta às **05h de Brasília** (08h UTC).
-O Cloudflare Workflows consulta uma vez o dia UTC anterior na rota nacional
-do INMET para estações automáticas. O Workers KV guarda um lote por dia.
-Cada implantação usa o Worker, o Workflow e o KV da conta que a publica.
+A coleta nacional roda **a cada cinco horas pelo formulário público do BDMEP**.
+O Cloudflare pede um arquivo das estações automáticas, recebe o retorno do
+INMET por e-mail e grava no Workers KV um índice por dia UTC.
+A operação roda na conta Cloudflare. O GitHub guarda o código e este guia.
 
 ## Consultar
 
@@ -16,35 +16,50 @@ por exemplo `A807` para Curitiba, e uma data no formato `AAAA-MM-DD`.
 | `GET /v1/fields` | Nome, código do INMET e unidade das 17 variáveis |
 | `GET /v1/observations?station=A807&date=2026-01-01` | Temperatura e umidade em JSON |
 | `GET /v1/observations?station=A807&date=2026-01-01&fields=all` | As 17 variáveis em JSON |
+| `GET /v1/observations?station=A807&date=2026-11-24&fields=all` | Consulta de uma estação do lote nacional recebido pelo BDMEP |
+| `GET /v1/observations?station=A843&date=2026-11-23&fallback=wis2` | Contingência WIS2 quando falta uma observação oficial indexada |
 
 O parâmetro `fields` aceita nomes separados por vírgula, na ordem desejada.
 Use `format=csv` para obter as mesmas linhas em CSV.
-O exemplo usa o ambiente local com um lote já carregado. Para consultar
-uma implantação publicada, use o endereço informado pelo Wrangler.
 
 ```bash
 curl -fS 'http://127.0.0.1:8787/v1/observations?station=A807&date=2026-01-01&fields=wind_speed_m_s,wind_direction_deg,wind_gust_m_s,precipitation_mm&format=csv'
 ```
 
 A API devolve os decimais como texto. `null` no JSON ou célula vazia no CSV
-indica medição ausente. `recorded: false` indica que a hora inteira falta.
+indica medição ausente. Na coleta, campos vazios, `Null` textual e os
+marcadores `9999` e `-9999` viram lacunas do sensor. Os demais sensores da
+mesma hora continuam disponíveis. `recorded: false` indica que o índice
+não contém registro para aquela hora.
 `day_not_found` significa dia ausente e `station_not_found` significa estação
 ausente num dia existente. A precipitação é a da hora. Os valores de pressão
 são ao nível da estação. A radiação horária está em kJ/m².
 
-[Definições das variáveis](src/fields.json) · [Fonte INMET](https://portal.inmet.gov.br/dadoshistoricos)
+As consultas leem primeiro os lotes históricos em `observations/v2/`.
+Para datas coletadas pelo BDMEP, o arquivo nacional aparece assim
+que o Worker termina a indexação. Quando já existe uma tabela individual
+do portal, a consulta conserva suas horas e completa as demais pelo BDMEP.
+`X-INMET-Source` identifica o canal `portal`, `bdmep` ou `wis2`.
+`X-INMET-Coverage` e `X-INMET-Observed-Hours` informam a cobertura da estação.
+Consumidores que aceitam a contingência WIS2 podem adicionar `fallback=wis2`.
+
+[Catálogo da API](http://127.0.0.1:8787/v1/fields) · [Fonte INMET](https://portal.inmet.gov.br/dadoshistoricos)
 
 ## Coleta e armazenamento
 
-O agendamento cria uma instância com o dia como identificador. Se o dia já
-está publicado, a instância encerra. O Workflow mantém a resposta original
-por 12 horas em uma chave temporária do KV. O JSON é carregado uma vez
-por execução contínua e normalizado em fatias de até 64 KiB. Uma retomada
-pode reler o original para processar uma fatia pendente. O buffer é liberado
-antes da compactação. Os registros são agrupados, os dados de cada
-estação são compactados em gzip e o resultado é publicado em uma única
-chave `observations/v2/AAAA-MM-DD.bin`. A leitura faz um acesso ao KV e usa
-o índice para descompactar somente a estação consultada.
+O Cron roda no início de cada hora UTC. Nas janelas de cinco horas corridas,
+contadas a partir de 25/11/2026 às 13h UTC, o Worker confere o acervo e
+pode abrir **um único pedido** no BDMEP. Enquanto um pedido aguarda
+confirmação ou arquivo, o agendamento aguarda. Uma entrega repetida do Cron
+reutiliza o identificador da janela.
+
+Às 08h UTC (05h de Brasília), o dia anterior passa a ser elegível para
+fechamento. A prioridade é o dia elegível mais recente. A partir desse
+horário, o sistema pode também colher o dia corrente uma vez, em caráter
+provisório. Depois vêm o dia anterior ao último elegível e a lacuna mais
+antiga dos últimos 30 dias. Um lote nacional definitivo já indexado por
+qualquer dos dois formatos encerra a pendência. Uma estação individual
+indexada ou uma contingência parcial continua permitindo a coleta nacional.
 
 O índice `NIM2` tem 10 bytes. São a assinatura, o dia UTC em dias desde
 1970-01-01 e a contagem de estações. Cada entrada ocupa 9 bytes com código
@@ -52,57 +67,123 @@ ASCII de 5 posições e deslocamento de 4 bytes. Inteiros usam ordem de bytes
 big-endian. Cada bloco gzip contém linhas `[hora, ...medições]` com as
 colunas na ordem de [fields.json](src/fields.json).
 
-O Workflow mantém o dia fora da consulta se a API do INMET ficar indisponível
-ou entregar JSON inválido. O histórico publicado continua disponível. O
-painel de Workflows mostra o erro da execução e permite disparar um dia em
-atraso. A coleta direta cobre estações automáticas. A fonte é o INMET e a
-disponibilidade dos sensores varia por estação e hora.
+O Cloudflare Browser Run seleciona a rede automática nacional e verifica
+que o formulário carregou as variáveis e as estações das cinco regiões
+antes de confirmar. Se o portal recusar a navegação ou deixar o catálogo
+vazio, o Workflow espera cinco minutos para repetir o formulário e
+admite outra tentativa dez minutos depois. Se as três tentativas
+falharem antes do envio, libera o recebimento e conserva a pendência
+para a próxima janela. Se a resposta se perder no envio, o Workflow aguarda o recibo por
+e-mail para evitar um segundo pedido. O Cloudflare Email Routing entrega os e-mails do INMET ao
+Worker e o Workflow confirma o pedido e baixa o arquivo oficial da fila.
+A confirmação e o download admitem três novas tentativas com esperas
+de cinco, dez e vinte minutos. Cada retomada usa o mesmo pedido recebido.
+O arquivo fica temporariamente no KV. Em cada execução do indexador,
+uma leitura carrega o ZIP, e cada bloco é validado e compactado no mesmo
+passo. Se o Workflow for retomado, ele pode reler o ZIP para continuar
+do último passo concluído. O índice NIM2 guarda as medições disponíveis
+com os decimais da fonte. A publicação grava um lote em
+`observations/bdmep/v1/AAAA-MM-DD.bin` e remove o ZIP temporário. Se
+o ZIP do dia já estiver no KV, a janela pode indexá-lo diretamente.
+[Portal oficial BDMEP](https://bdmep.inmet.gov.br/)
+
+O acervo histórico `observations/v2/`, a tabela por estação e os lotes
+WIS2 já recebidos continuam disponíveis pelas rotas de consulta. O
+Workflow anterior `nuvem-inmet-daily` permanece disponível para
+importações explícitas. O Cron aciona exclusivamente `nuvem-inmet-bdmep`.
+
+A contingência WIS2 usa o mesmo formato binário, na chave
+`observations/wis2/v1/AAAA-MM-DD.bin`. Ela verifica unidades e intervalos
+para temperatura instantânea, máxima e mínima, umidade, vento, rajada,
+direção, pressão da estação, chuva e ponto de orvalho. As demais
+variáveis aparecem como lacunas. Há uma consulta de cobertura e no
+máximo uma transferência CSV por hora. Quando o WIS2 acrescenta dados,
+uma nova tentativa pode ampliar a cobertura publicada.
+
+Os identificadores WIGOS da rede automática vêm do catálogo oficial
+WIS2. O vínculo com os códigos usados na API foi feito por nome
+normalizado e coordenadas a até 100 m no ZIP oficial de 2026. Vínculos
+ambíguos são descartados. Para atualizar o mapa, use um ZIP anual oficial
+e execute na raiz do repositório:
+
+```bash
+python cloudflare/scripts/map-wis2-stations.py data/2026.zip
+```
+
+[Catálogo WIS2 de estações](https://wis2bra.inmet.gov.br/oapi/collections/stations) · [Observações automáticas no WIS2](https://wis2bra.inmet.gov.br/oapi/collections/urn:wmo:md:br-inmet:synop) · [Arquivo oficial do INMET](https://portal.inmet.gov.br/dadoshistoricos)
 
 [Limites de Workers](https://developers.cloudflare.com/workers/platform/limits/) · [Limites de Workflows](https://developers.cloudflare.com/workflows/reference/limits/) · [Limites de KV](https://developers.cloudflare.com/kv/platform/limits/)
 
-## Teste local
+## Verificação do protocolo
 
-No diretório `cloudflare/`, use Node.js 22 ou superior e a versão do Wrangler
-fixada no projeto.
+`npm run test:workflow` usa Workerd e fontes simuladas para exercitar o
+Cron, o formulário, a confirmação, o download, a indexação e a consulta.
+O ensaio provoca falhas transitórias e verifica a recuperação sem pedidos
+duplicados. Ele não envia solicitações reais ao INMET nem publica Workers.
+
+## Publicação e acompanhamento
+
+No diretório `cloudflare/`, use Node.js 22 ou superior e a versão
+fixada do Wrangler. A configuração pública não contém identificadores,
+endereços de recebimento ou credenciais de uma implantação.
 
 ```bash
 npm ci
 npm test
+npm run test:workflow
 npm run build
-npm run dev
+npx wrangler whoami
 ```
 
-Acesse `http://127.0.0.1:8787/health` para conferir o KV local. O
-`/v1/fields` lista as variáveis sem precisar carregar dados. Para
-consultar uma estação, carregue um lote conforme a seção de histórico.
-
-## Publicação e reprocessamento
-
-Use `npx wrangler whoami` para conferir a conta de destino. Faça uma
-cópia local da configuração antes de publicar. O Wrangler cria o namespace KV
-na conta de destino e grava o ID nessa cópia, ignorada pelo Git.
+Copie as configurações para arquivos locais ignorados pelo Git:
 
 ```powershell
 Copy-Item wrangler.jsonc wrangler.local.jsonc
-npm run deploy -- --config wrangler.local.jsonc
+Copy-Item bdmep.wrangler.jsonc bdmep.wrangler.local.jsonc
+npx wrangler kv namespace create INMET_DAYS
 ```
 
-Em Bash, use `cp wrangler.jsonc wrangler.local.jsonc` para copiar o arquivo.
-Reutilize essa cópia nos próximos deploys. Ajuste os nomes do Worker e
-do Workflow nela se a conta já tiver recursos com os nomes de exemplo.
+Preencha o mesmo ID de KV nas duas cópias. Ajuste nelas os nomes de Worker
+e Workflow, incluindo a referência `script_name`, se os nomes de exemplo
+já estiverem ocupados na conta. Em Bash, use `cp` no lugar de `Copy-Item`.
 
-Confira `/health`, a leitura de um dia com dados e o Cron `0 8 * * *`
-depois da publicação. Para reprocessar uma data em atraso, abra o Workflow
-no painel e inicie uma instância com o dia UTC desejado em JSON, por
-exemplo `{"day":"2026-04-20"}`. O painel informa o resultado da tentativa.
+No coletor BDMEP, configure em `vars` da cópia local o endereço exclusivo
+`BDMEP_ADDRESS` e a conta `BDMEP_BROWSER_ACCOUNT`. Roteie esse endereço
+para o coletor usando Cloudflare Email Routing. A credencial exclusiva de
+Browser Run fica como segredo do Worker; informe seu valor somente no
+prompt do Wrangler ou no painel Cloudflare.
 
-[Provisionamento automático do Wrangler](https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning)
+```bash
+npx wrangler deploy --config bdmep.wrangler.local.jsonc
+npx wrangler secret put BDMEP_BROWSER_TOKEN --config bdmep.wrangler.local.jsonc
+npx wrangler deploy --config wrangler.local.jsonc
+```
+
+Reutilize as cópias locais nos próximos deploys. O gatilho do Worker de
+consulta chama o Workflow do BDMEP por binding. Os exemplos de consulta
+neste guia usam o servidor local; na publicação, substitua a origem pelo
+endereço informado pelo Wrangler.
+
+Confira `/health`, a leitura de um dia com dados e o Cron `0 * * * *`
+depois da publicação. No painel de Workflows, a janela UTC aparece no fim
+do identificador. Por exemplo, `bdmep-janela-2026-11-26T14` corresponde
+à janela das 11h de Brasília de 26/11. O parâmetro `day` informa o
+dia solicitado. O resultado `indexed`, com a quantidade de estações
+e o tamanho em bytes, confirma que o lote chegou ao índice.
+
+Para diagnosticar o BDMEP, abra a instância do Workflow `nuvem-inmet-bdmep`
+e veja `diagnostics` no resultado da etapa do formulário. Ali ficam
+as fases em ordem, o tempo decorrido e os códigos HTTP que o navegador
+conseguiu ler. Um código vazio indica que o navegador não expôs o status.
+Uma resposta HTTP 4xx ou 5xx encerra a tentativa antes de interagir com a página.
+O Worker também emite eventos `bdmep_coleta` com a fase e a instância em
+`instance`. Os eventos omitem endereços, credenciais e links privados do pedido.
 
 ## Carga histórica
 
 Use os arquivos horários das estações automáticas do INMET. O código
-interpreta as medições da fonte e preserva as lacunas. Ao compartilhar dados
-de um espelho, conserve a atribuição e os termos da fonte.
+preserva as medições disponíveis e as lacunas. Ao redistribuir dados de
+um espelho, conserve a atribuição e os termos da fonte.
 
 [Arquivos históricos do INMET](https://portal.inmet.gov.br/dadoshistoricos)
 
@@ -118,5 +199,5 @@ npx wrangler kv key put observations/v2/2026-01-01.bin --binding INMET_DAYS --pa
 ```
 
 Use a chave correspondente a cada data do manifesto em uma carga nova.
-Para importar na conta Cloudflare, use `--remote --config wrangler.local.jsonc`
-no lugar de `--local` e confira primeiro se a data já existe no destino.
+Para carregar na conta Cloudflare, substitua `--local` por
+`--remote --config wrangler.local.jsonc` e confira antes se a data já existe.

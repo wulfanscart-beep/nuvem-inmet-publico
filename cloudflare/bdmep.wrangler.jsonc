@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nuvem-inmet-exemplo-bdmep",
+  "main": "src/bdmep-worker.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "keep_vars": true,
+  "observability": {
+    "enabled": true
+  },
+  "browser": {
+    "binding": "INMET_BROWSER"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "INMET_DAYS"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "nuvem-inmet-exemplo-bdmep",
+      "binding": "BDMEP_FLOW",
+      "class_name": "InmetBdmepCollection",
+      "concurrency": {
+        "limit": 1
+      }
+    }
+  ]
+}

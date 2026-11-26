@@ -1,0 +1,111 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { bdmepKey, packedKey, stagedBdmepKey } from "../src/packed.js";
+import { mailboxState, scheduleCollection } from "../src/schedule.js";
+
+const hour = 3_600_000;
+const first = Date.parse("2026-11-25T13:00:00Z");
+const morning = Date.parse("2026-11-26T09:00:00Z");
+const previous = "2026-11-25";
+const today = "2026-11-26";
+
+function setup() {
+  const entries = new Map();
+  const ids = new Set();
+  const jobs = [];
+  const kv = {
+    get: async key => entries.has(key) ? "open" : null,
+    getWithMetadata: async key => ({
+      value: entries.has(key) ? new Response("archive").body : null,
+      metadata: entries.get(key),
+    }),
+    async list({ prefix, cursor }) {
+      const names = [...entries.keys()].filter(key => key.startsWith(prefix)).sort();
+      const offset = Number(cursor || 0);
+      const page = names.slice(offset, offset + 3);
+      return {
+        keys: page.map(name => ({ name, metadata: entries.get(name) })),
+        list_complete: offset + page.length === names.length,
+        cursor: String(offset + page.length),
+      };
+    },
+  };
+  const collector = { async createBatch({ instances }) {
+    assert.equal(instances.length, 1);
+    const [job] = instances;
+    if (ids.has(job.id)) return { created: [], errors: [{ code: 10405 }] };
+    ids.add(job.id);
+    jobs.push(job);
+    return { created: [job], errors: [] };
+  } };
+  return { kv, collector, entries, jobs, run: time => scheduleCollection(time, kv, collector) };
+}
+
+test("uma janela cria só um pedido pelo portal e uma entrega repetida do cron não cria outro", async () => {
+  const { run, jobs, entries } = setup();
+  const firstRun = await run(morning);
+  assert.equal(firstRun.status, "scheduled");
+  assert.equal(firstRun.day, previous);
+  assert.deepEqual(jobs[0].params, { day: previous, slot: "2026-11-26T09", provisional: false, indexOnly: false });
+  entries.set(bdmepKey(previous), { provisional: false });
+  assert.equal((await run(morning + 21_007)).status, "already_scheduled");
+  assert.equal(jobs.length, 1);
+  assert.deepEqual((await run(morning + 5 * hour)).day, today);
+  assert.equal(jobs[1].params.provisional, true);
+});
+
+test("um pedido recusado antes do envio pode ser refeito na janela seguinte para a mesma data", async () => {
+  const { run, jobs } = setup();
+  await run(morning);
+  await run(morning + 5 * hour);
+  assert.deepEqual(jobs.map(job => job.params.day), [previous, previous]);
+  assert.notEqual(jobs[0].id, jobs[1].id);
+});
+
+test("o cron só acessa os bindings a cada cinco horas corridas, inclusive na virada UTC", async () => {
+  for (let i = -1; i <= 32; i++) {
+    const time = first + i * hour;
+    if (i >= 0 && i % 5 === 0) {
+      const { run } = setup();
+      assert.equal((await run(time)).slot, new Date(time).toISOString().slice(0, 13));
+    } else {
+      assert.equal(await scheduleCollection(time, {}, {}), null);
+    }
+  }
+  const { run } = setup();
+  assert.equal((await run(first - 1)).slot, "2026-11-25T13");
+  assert.equal((await run(Date.parse("2026-11-26T04:00:00Z"))).day, "2026-11-24");
+});
+
+test("aguarda um pedido aberto e retoma um ZIP já recebido antes de pedir outro", async () => {
+  const { run, entries, jobs } = setup();
+  entries.set(mailboxState, true);
+  assert.equal((await run(morning)).status, "awaiting_portal");
+  assert.equal(jobs.length, 0);
+  entries.delete(mailboxState);
+  entries.set(bdmepKey(previous), { provisional: true });
+  entries.set(stagedBdmepKey(previous), { provisional: true });
+  assert.equal((await run(morning)).indexOnly, false);
+  entries.set(stagedBdmepKey(previous), { provisional: false });
+  assert.equal((await run(morning + 5 * hour)).indexOnly, true);
+});
+
+test("o histórico fecha por qualquer lote nacional definitivo e recupera as lacunas entre meses", async () => {
+  const { run, entries } = setup();
+  for (let i = 0; i < 30; i++) {
+    const day = new Date(Date.parse(previous) - i * 24 * hour).toISOString().slice(0, 10);
+    entries.set(i % 2 ? bdmepKey(day) : packedKey(day), null);
+  }
+  entries.set(bdmepKey(previous), { provisional: true });
+  entries.set(bdmepKey(today), { provisional: true });
+  assert.equal((await run(morning)).status, "up_to_date");
+  entries.delete(packedKey("2026-10-28"));
+  assert.equal((await run(morning)).day, "2026-10-28");
+});
+
+test("erros da criação do Workflow continuam visíveis no gatilho", async () => {
+  const { kv } = setup();
+  await assert.rejects(scheduleCollection(morning, kv, {
+    createBatch: async () => ({ created: [], errors: [{ code: 10400 }] }),
+  }), /Falha ao agendar BDMEP: 10400/);
+});

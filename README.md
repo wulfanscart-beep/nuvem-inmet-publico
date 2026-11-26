@@ -1,8 +1,15 @@
 # Nuvem-INMET
 
+O sistema Cloudflare reúne as 17 variáveis horárias das estações automáticas
+pelo formulário público do BDMEP. A coleta, o recebimento por e-mail,
+a compactação e as consultas rodam no Cloudflare, com janelas de cinco horas.
+Veja [operação, implantação e consultas](cloudflare/README.md).
+
+## Acervo Python local
+
 Acervo local de observações meteorológicas horárias. Armazena temperatura do ar
 em °C e umidade relativa em %, com consulta offline e exportação de recortes.
-A coleta padrão usa a API pública do INMET. Também é possível importar ZIPs
+Este programa separado mantém a coleta pela rota de dados do INMET. Também é possível importar ZIPs
 históricos oficiais já baixados e, opcionalmente, consultar a Base dos Dados
 no BigQuery.
 

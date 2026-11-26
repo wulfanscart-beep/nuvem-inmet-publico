@@ -6,6 +6,8 @@ const entrySize = 9;
 const magic = 0x4e494d32; // NIM2
 const decoder = new TextDecoder();
 export const maxPackedBytes = 2 * 1024 * 1024;
+export const packedPrefix = "observations/v2/";
+export const bdmepPrefix = "observations/bdmep/v1/";
 export const stationCode = /^(?:[A-Z][0-9]{3}|[0-9]{5})$/;
 
 function dayNumber(day) {
@@ -14,7 +16,28 @@ function dayNumber(day) {
 
 export function packedKey(day) {
   batchKey(day);
-  return "observations/v2/" + day + ".bin";
+  return packedPrefix + day + ".bin";
+}
+
+export function wis2Key(day) {
+  batchKey(day);
+  return "observations/wis2/v1/" + day + ".bin";
+}
+
+export function bdmepKey(day) {
+  batchKey(day);
+  return bdmepPrefix + day + ".bin";
+}
+
+export function stagedBdmepKey(day) {
+  batchKey(day);
+  return "staging/bdmep/v1/" + day;
+}
+
+export function portalKey(day, station) {
+  batchKey(day);
+  if (!stationCode.test(station)) throw new Error("Código de estação inválido.");
+  return "observations/portal/v1/" + day + "/" + station + ".bin";
 }
 
 function indexOf(buffer, day) {

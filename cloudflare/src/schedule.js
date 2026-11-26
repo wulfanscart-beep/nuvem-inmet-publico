@@ -13,13 +13,19 @@ const collectionInterval = 5 * millisecondsPerHour;
 const firstCollection = Date.UTC(2026, 10, 25, 13);
 const previousDayRelease = 8 * millisecondsPerHour;
 
-export async function scheduleCollection(scheduledTime, kv, collector) {
+function collectionSlot(scheduledTime) {
   // The Cron trigger runs on the hour. Use the same slot for nearby timestamps.
   const slotTime = Math.round(scheduledTime / millisecondsPerHour) * millisecondsPerHour;
   if (slotTime < firstCollection || (slotTime - firstCollection) % collectionInterval !== 0) {
     return null;
   }
-  const slot = new Date(slotTime).toISOString().slice(0, 13);
+  return new Date(slotTime).toISOString().slice(0, 13);
+}
+
+export async function scheduleCollection(scheduledTime, kv, collector) {
+  const slot = collectionSlot(scheduledTime);
+  if (!slot) return null;
+  const slotTime = Date.parse(slot + ":00:00Z");
   const pending = await kv.get(mailboxState, "json");
   if (pending) {
     if (pending.id && Object.values(resumableBdmepSteps).includes(pending.resumeFrom)
@@ -74,4 +80,57 @@ export async function scheduleCollection(scheduledTime, kv, collector) {
   const failure = errors.find(error => error.code !== 10405);
   if (failure) throw new Error("Falha ao agendar BDMEP: " + failure.code);
   return { slot, day, provisional, indexOnly, id, status: created.length ? "scheduled" : "already_scheduled" };
+}
+
+const surveyDispatchKey = "portal/survey/v1/dispatch";
+const surveyStateKey = "portal/survey/v1/active";
+
+export async function scheduleStationTables(scheduledTime, kv, collector) {
+  const slot = collectionSlot(scheduledTime);
+  if (!slot) return null;
+  const today = slot.slice(0, 10);
+  const [active, dispatch] = await Promise.all([
+    kv.get(surveyStateKey, "json"), kv.get(surveyDispatchKey, "json"),
+  ]);
+  // A dispatch may already be queued while another job occupies the Workflow.
+  const knownId = dispatch?.id || active?.id;
+  const terminal = active?.id === knownId && ["complete", "partial"].includes(active?.status);
+  if (knownId && !terminal) {
+    const instance = await collector.get(knownId);
+    const { status } = await instance.status();
+    if (!["complete", "errored", "terminated"].includes(status)) {
+      return { slot, id: knownId, status };
+    }
+  }
+  const id = "tabelas-" + slot;
+  const slotIndex = Math.round((Date.parse(slot + ":00:00Z") - firstCollection) / collectionInterval);
+  let day = today;
+  let previousId;
+  // Reserve one in three slots for a previous UTC day with unfinished stations.
+  if (slotIndex % 3 === 0) {
+    const yesterday = previousUtcDay(Date.parse(slot + ":00:00Z"));
+    const previous = await kv.get("portal/survey/v1/days/" + yesterday, "json");
+    if (previous?.status === "partial" && previous.id &&
+        (previous.pendingStations?.length || previous.authoritative === false)) {
+      const packed = await kv.list({ prefix: packedPrefix + yesterday + ".bin", limit: 1 });
+      const bulk = await kv.list({ prefix: bdmepPrefix + yesterday + ".bin", limit: 1 });
+      if (!packed.keys.length && !bulk.keys.some(entry => !entry.metadata?.provisional)) {
+        day = yesterday;
+        previousId = previous.id;
+      }
+    }
+  } else if (slotIndex % 3 === 1 && active?.day === today && active.status === "partial"
+      && active.pendingStations?.length && active.id !== id) {
+    previousId = active.id;
+  }
+  const params = { mode: "station-tables", day };
+  if (previousId) params.previousId = previousId;
+  if (active?.resumeAt && Date.parse(active.resumeAt) > Date.now()) params.notBefore = active.resumeAt;
+  const { created, errors } = await collector.createBatch({ instances: [{ id, params }] });
+  const error = errors.find(entry => entry.code !== 10405);
+  if (error) throw new Error("Falha ao agendar tabelas: " + error.code);
+  if (dispatch?.id !== id) {
+    await kv.put(surveyDispatchKey, JSON.stringify({ id }), { expirationTtl: 2 * 86400 });
+  }
+  return { slot, id, day, status: created.length ? "scheduled" : "already_scheduled" };
 }

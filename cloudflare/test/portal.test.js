@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { handleRequest } from "../src/http.js";
 import { packedKey, portalKey } from "../src/packed.js";
-import { indexPortalCsv, readPortalCsv } from "../src/portal.js";
+import { indexPortalCsv, indexPortalJson, readPortalCsv } from "../src/portal.js";
 
 const day = "2026-11-24";
 const head = '"Data";"Hora (UTC)";"Temp. Ins. (C)";"Temp. Max. (C)";"Temp. Min. (C)";"Umi. Ins. (%)";"Umi. Max. (%)";"Umi. Min. (%)";"Pto Orvalho Ins. (C)";"Pto Orvalho Max. (C)";"Pto Orvalho Min. (C)";"Pressao Ins. (hPa)";"Pressao Max. (hPa)";"Pressao Min. (hPa)";"Vel. Vento (m/s)";"Dir. Vento (m/s)";"Raj. Vento (m/s)";"Radiacao (KJ/m²)";"Chuva (mm)"';
@@ -47,4 +47,49 @@ test("impede que uma exportação inválida chegue ao índice", () => {
   assert.throws(() => readPortalCsv({ ...capture, url: capture.url.replace("tempo.inmet.gov.br", "example.com") }));
   assert.throws(() => readPortalCsv({ ...capture, csv: [head, empty].join("\n") }), /não contém medições/);
   assert.throws(() => readPortalCsv({ ...capture, csv: [head, observed, observed.replace("30,0", "31,0")].join("\n") }), /conflito/);
+});
+
+test("JSON horário atualiza precisão, preserva zeros e completa lacunas na mesma chave do CSV", async () => {
+  const station = "A040";
+  const entries = new Map();
+  let writes = 0;
+  const kv = {
+    get: async key => entries.get(key) ?? null,
+    put: async (key, value) => { writes++; entries.set(key, value); },
+  };
+  await indexPortalCsv(portal(station), kv, step);
+  const json = `[
+    {"CD_ESTACAO":"A040","DT_MEDICAO":"${day}","HR_MEDICAO":"1900","TEM_INS":20.12500,"VEN_VEL":null},
+    {"CD_ESTACAO":"A040","DT_MEDICAO":"${day}","HR_MEDICAO":"2000","RAD_GLO":"-3.3","CHUVA":0},
+    {"CD_ESTACAO":"A040","DT_MEDICAO":"${day}","HR_MEDICAO":"2100","TEN_BAT":"12.2","TEM_INS":null}
+  ]`;
+  assert.deepEqual(await indexPortalJson({ station, day, json }, kv), {
+    station, day, status: "stored", observedHours: 2,
+  });
+  assert.equal((await indexPortalJson({ station, day, json }, kv)).status, "already_stored");
+  assert.equal((await indexPortalCsv(portal(station), kv, step)).days[0].status, "already_stored");
+  assert.equal(writes, 2);
+  assert.deepEqual([...entries.keys()], [portalKey(day, station)]);
+  const response = await handleRequest(new Request(
+    "https://worker.test/v1/observations?date=" + day + "&fields=all&station=" + station
+  ), { INMET_DAYS: kv });
+  assert.equal(response.headers.get("X-INMET-Observed-Hours"), "2");
+  const rows = await response.json();
+  assert.equal(rows[19].temperature_c, "20.12500");
+  assert.equal(rows[19].wind_speed_m_s, "5.8");
+  assert.equal(rows[20].precipitation_mm, "0");
+  assert.equal(rows[20].solar_radiation_kj_m2, "-3.3");
+  assert.equal(rows[21].recorded, false);
+});
+
+test("valida a estação e o dia até em linhas vazias antes de gravar", async () => {
+  const station = "A040";
+  const valid = { CD_ESTACAO: station, DT_MEDICAO: day, HR_MEDICAO: "0300", VEN_RAJ: "0" };
+  const index = rows => indexPortalJson({ station, day, json: JSON.stringify(rows) }, {});
+  await assert.rejects(index([valid, { ...valid, CD_ESTACAO: "A041", VEN_RAJ: null }]), /diverge/);
+  await assert.rejects(index([valid, { ...valid, DT_MEDICAO: "2026-11-25" }]), /diverge/);
+  await assert.rejects(index([valid, { ...valid, VEN_RAJ: "5.2" }]), /conflito/);
+  assert.deepEqual(await index([{ ...valid, VEN_RAJ: null }]), {
+    station, day, observedHours: 0, status: "no_measurements",
+  });
 });

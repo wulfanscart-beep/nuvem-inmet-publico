@@ -69,3 +69,34 @@ test("indexa o CSV horário oficial em duas estações com decimais e lacunas da
   assert.equal(combined[18].temperature_c, "19.20");
   assert.equal(combined[19].wind_gust_m_s, "14.0");
 });
+
+test("consulta o BDMEP apenas quando há lacuna nas horas ou nos campos pedidos ao portal", async () => {
+  const station = "A807";
+  const portal = Array.from({ length: 24 }, (_, hour) => [hour, "0.00", ...Array(16).fill(null)]);
+  const bdmep = [[4, "1.00", "81.0", ...Array(15).fill(null)]];
+  const pack = async rows => joinStations(day, new Map([[station, await compressStation(rows)]]));
+  const sources = new Map([
+    [portalKey(day, station), await pack(portal)],
+    [bdmepKey(day), await pack(bdmep)],
+  ]);
+  const reads = [];
+  const kv = { get: async key => { reads.push(key); return sources.get(key) ?? null; } };
+  const request = fields => handleRequest(new Request(
+    `https://worker.test/v1/observations?station=${station}&date=${day}&fields=${fields}`
+  ), { INMET_DAYS: kv });
+
+  const measured = await request("temperature_c");
+  assert.equal((await measured.json())[4].temperature_c, "0.00");
+  assert.deepEqual(reads, [packedKey(day), portalKey(day, station)]);
+
+  reads.length = 0;
+  const merged = await request("temperature_c,relative_humidity_percent");
+  assert.deepEqual(reads, [packedKey(day), portalKey(day, station), bdmepKey(day)]);
+  assert.equal(merged.headers.get("X-INMET-Source"), "portal");
+  assert.equal(merged.headers.get("X-INMET-Observed-Hours"), "24");
+  assert.equal(merged.headers.get("X-INMET-Coverage"), "complete");
+  const rows = await merged.json();
+  assert.equal(rows[4].temperature_c, "0.00");
+  assert.equal(rows[4].relative_humidity_percent, "81.0");
+  assert.equal(rows[5].relative_humidity_percent, null);
+});

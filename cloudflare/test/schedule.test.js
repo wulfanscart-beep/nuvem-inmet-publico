@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bdmepKey, packedKey, stagedBdmepKey } from "../src/packed.js";
-import { mailboxState, resumableBdmepSteps, scheduleCollection } from "../src/schedule.js";
+import { mailboxState, resumableBdmepSteps, scheduleCollection, scheduleStationTables } from "../src/schedule.js";
 
 const hour = 3_600_000;
 const first = Date.parse("2026-11-25T13:00:00Z");
@@ -53,6 +53,47 @@ test("uma janela cria só um pedido pelo portal e uma entrega repetida do cron n
   assert.equal(jobs.length, 1);
   assert.deepEqual((await run(morning + 5 * hour)).day, today);
   assert.equal(jobs[1].params.provisional, true);
+});
+
+test("o Cron respeita a espera do navegador inclusive na virada do dia", async () => {
+  const { kv, collector, entries, jobs } = setup();
+  entries.set("portal/survey/v1/active", { id: "tabelas-anterior", day: previous, status: "waiting" });
+  collector.get = async id => {
+    assert.equal(id, "tabelas-anterior");
+    return { status: async () => ({ status: "waiting" }) };
+  };
+  assert.equal(await scheduleStationTables(morning + hour, kv, collector), null);
+  assert.equal((await scheduleStationTables(morning, kv, collector)).status, "waiting");
+  assert.equal(jobs.length, 0);
+});
+
+test("só enfileira uma rodada por janela mesmo antes do primeiro passo do Workflow", async () => {
+  const { kv, collector, jobs } = setup();
+  const run = () => scheduleStationTables(morning, kv, collector);
+  const firstRun = await run();
+  collector.get = async () => ({ status: async () => ({ status: "queued" }) });
+  assert.equal((await run()).status, "queued");
+  assert.equal((await scheduleStationTables(morning + 5 * hour, kv, collector)).id, firstRun.id);
+  assert.deepEqual(jobs, [{ id: firstRun.id, params: { mode: "station-tables", day: today } }]);
+});
+
+test("a recuperação do dia anterior usa as pendências e preserva o estado para a retomada", async () => {
+  const { kv, collector, entries, jobs } = setup();
+  const prior = { id: "ontem", day: previous, status: "partial", pendingStations: ["A040"] };
+  entries.set("portal/survey/v1/active", prior);
+  entries.set("portal/survey/v1/days/" + previous, prior);
+  const recoverySlot = first + 6 * 5 * hour;
+  await scheduleStationTables(recoverySlot, kv, collector);
+  assert.deepEqual(jobs[0].params, { mode: "station-tables", day: previous, previousId: prior.id });
+  assert.deepEqual(entries.get("portal/survey/v1/active"), prior);
+});
+
+test("revalida a cobertura de um catálogo provisório mesmo quando todos os seus códigos responderam", async () => {
+  const { kv, collector, entries, jobs } = setup();
+  const prior = { id: "lista-provisoria", day: previous, status: "partial", pendingStations: [], authoritative: false };
+  entries.set("portal/survey/v1/days/" + previous, prior);
+  await scheduleStationTables(first + 6 * 5 * hour, kv, collector);
+  assert.equal(jobs[0].params.previousId, prior.id);
 });
 
 test("um pedido recusado antes do envio pode ser refeito na janela seguinte para a mesma data", async () => {

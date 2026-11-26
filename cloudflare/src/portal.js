@@ -76,25 +76,48 @@ export async function indexPortalCsv(capture, kv, step) {
   const { station, days } = await step.do("validar CSV do portal", () => readPortalCsv(capture));
   const results = [];
   for (const { day, rows } of days) {
-    results.push(await step.do("indexar portal " + day, async () => {
-      const key = portalKey(day, station);
-      const existing = await kv.get(key, "arrayBuffer");
-      const hours = existing ? await readPackedStation(existing, day, station) : new Map();
-      let changed = false;
-      for (const row of rows) {
-        const previous = hours.get(row[0]);
-        const merged = previous?.map((value, index) => value ?? row[index]) ?? row;
-        if (!previous || merged.some((value, index) => value !== previous[index])) {
-          hours.set(row[0], merged);
-          changed = true;
-        }
-      }
-      if (changed) {
-        const compressed = await compressStation([...hours.values()].sort((a, b) => a[0] - b[0]));
-        await kv.put(key, joinStations(day, new Map([[station, compressed]])));
-      }
-      return { day, observedHours: hours.size, status: changed ? "stored" : "already_stored" };
-    }));
+    results.push(await step.do("indexar portal " + day, () =>
+      mergePortalDay(kv, day, station, rows, false)));
   }
   return { source: "portal", station, days: results };
+}
+
+// One automatic station and UTC day per response from the hourly table.
+// Keep the original text until normalizeInmetRows extracts each decimal.
+export async function indexPortalJson({ station, day, json }, kv) {
+  portalKey(day, station);
+  if (typeof json !== "string" || json.length > 128_000) {
+    throw new Error("JSON da tabela ausente ou acima do limite por estação.");
+  }
+  const normalized = normalizeInmetRows(json, day, { extended: true });
+  const rows = [];
+  for (const [code, hour, ...measurements] of normalized) {
+    if (code !== station) throw new Error("Estação da resposta diverge da estação consultada.");
+    if (measurements.some(value => value !== null)) rows.push([hour, ...measurements]);
+  }
+  if (!rows.length) return { station, day, observedHours: 0, status: "no_measurements" };
+  return { station, ...await mergePortalDay(kv, day, station, rows, true) };
+}
+
+async function mergePortalDay(kv, day, station, rows, preferIncoming) {
+  const key = portalKey(day, station);
+  const existing = await kv.get(key, "arrayBuffer");
+  const hours = existing ? await readPackedStation(existing, day, station) : new Map();
+  let changed = false;
+  for (const row of rows) {
+    const previous = hours.get(row[0]);
+    // Raw values can refine the rounded CSV. A missing value never erases a measurement.
+    const merged = previous
+      ? row.map((value, index) => preferIncoming ? value ?? previous[index] : previous[index] ?? value)
+      : row;
+    if (!previous || merged.some((value, index) => value !== previous[index])) {
+      hours.set(row[0], merged);
+      changed = true;
+    }
+  }
+  if (changed) {
+    const compressed = await compressStation([...hours.values()].sort((a, b) => a[0] - b[0]));
+    await kv.put(key, joinStations(day, new Map([[station, compressed]])));
+  }
+  return { day, observedHours: hours.size, status: changed ? "stored" : "already_stored" };
 }

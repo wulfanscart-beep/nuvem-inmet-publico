@@ -146,7 +146,9 @@ export async function handleRequest(request, env) {
       }
     }
     const fromPortal = headers?.['X-INMET-Source'] === 'portal';
-    if (env?.INMET_DAYS && (!hours?.size || (fromPortal && hours.size < 24))) {
+    const portalHasGaps = fromPortal && (hours.size < 24 || [...hours.values()].some(row =>
+      selected.some(name => row[fieldPositions.get(name)] === null)));
+    if (env?.INMET_DAYS && (!hours?.size || portalHasGaps)) {
       const bdmep = await env.INMET_DAYS.get(bdmepKey(day), 'arrayBuffer');
       if (bdmep !== null) {
         officialDayExists = true;
@@ -154,7 +156,8 @@ export async function handleRequest(request, env) {
         if (reports.size > 0) {
           if (fromPortal) {
             for (const [hour, row] of reports) {
-              if (!hours.has(hour)) hours.set(hour, row);
+              const primary = hours.get(hour);
+              hours.set(hour, primary ? primary.map((value, index) => value ?? row[index]) : row);
             }
           } else {
             hours = reports;

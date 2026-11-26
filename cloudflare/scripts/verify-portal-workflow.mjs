@@ -9,6 +9,8 @@ import { Miniflare, convertV4MiniflareOptions, Response } from "miniflare";
 import { bdmepKey, stagedBdmepKey } from "../src/packed.js";
 import { mailboxState } from "../src/schedule.js";
 import { bdmepVariables } from "../src/bdmep-form.js";
+import { surveyActiveKey, surveyDayKey } from "../src/station-survey.js";
+import snapshot from "../src/station-catalog-snapshot.json" with { type: "json" };
 
 const day = "2026-11-25";
 const names = Object.keys(bdmepVariables);
@@ -17,6 +19,60 @@ const csv = [
   ...["A843", "A807"].map(code => [code, day, "1900", ...names.map(k => k === "TEM_INS" ? "21.90" : k === "VEN_RAJ" ? "14.0" : "")].join(";"))
 ].join("\n");
 const binding = { name: "coleta-local", className: "InmetBdmepCollection" };
+const tableBinding = { name: "tabelas-locais", className: "InmetDailyCollection" };
+const tableDay = "2026-11-26";
+const testStations = ["A040", "A807"];
+const tableValues = { A040: ["24.90", "4.5"], A807: ["21.30", "0.0"] };
+const regions = {
+  N: "AC AP AM PA RO RR TO", NO: "AL BA CE MA PB PE PI RN SE",
+  SU: "ES MG RJ SP", S: "PR RS SC", CO: "DF GO MT MS",
+};
+const catalog = Object.fromEntries(Object.entries(regions).map(([region, states]) => [
+  region, states.split(" ").flatMap(state => snapshot.states[state]),
+]));
+const allStations = Object.values(catalog).flat().sort();
+assert.equal(allStations.length, 668);
+const browserFixture = `
+  import { WorkerEntrypoint } from "cloudflare:workers";
+  let confirmations = 0;
+  const visits = [];
+  const closed = [];
+  let quotaProbes = 0;
+  const values = ${JSON.stringify(tableValues)};
+  export default class extends WorkerEntrypoint {
+    async quickAction(action, request) {
+      if (action !== "content" || request.url !== "https://bdmep.inmet.gov.br/confirmacao/fixture") {
+        throw new Error("Confirmação inesperada");
+      }
+      confirmations++;
+      return Response.json({success:true,result:confirmations===1?"Servidor indisponível":
+        "<div>Sua requisição foi confirmada e está na fila para ser processada!</div>"});
+    }
+    async script(source, options) {
+      if (closed.length) {
+        quotaProbes++;
+        return new Response(null, { status: 429, headers: { "Retry-After": "21600" } });
+      }
+      const station = Object.keys(values).find(code =>
+        source.includes("https://tempo.inmet.gov.br/tabela/mapa/" + code + "/${tableDay}"));
+      if (!station || visits.includes(station) || options.library !== "playwright") {
+        throw new Error("Visita inesperada na bancada");
+      }
+      if (visits.length && (options.sessionId !== "local-session" || options.targetId !== "local-target")) {
+        throw new Error("A segunda estação abriu outro navegador");
+      }
+      visits.push(station);
+      const [temperature, gust] = values[station];
+      const rows = [{ CD_ESTACAO: station, DT_MEDICAO: "${tableDay}", HR_MEDICAO: "0300",
+        TEM_INS: temperature, VEN_RAJ: gust }];
+      return Response.json({ success: true, result: { text: JSON.stringify(rows) } }, {
+        headers: { "cf-browser-session-id": "local-session", "cf-browser-target-id": "local-target" },
+      });
+    }
+    async closeSession(id) { closed.push(id); }
+    async fetch() { return Response.json({visits,closed,quotaProbes}); }
+  }`;
+function rejectOutbound(req) { throw new Error("Rede externa na bancada: " + new URL(req.url).hostname); }
 const base = { compatibilityDate: "2026-10-01", modules: true, unsafeTriggerHandlers: true };
 const kvNamespaces = { INMET_DAYS: "mesmo-kv-isolado" };
 const requests = [];
@@ -26,7 +82,8 @@ let downloads = 0;
 let deliveryBlocked = false;
 const runtime = new Miniflare(convertV4MiniflareOptions({ workers: [
   { ...base, name: "consulta-local", scriptPath: ".wrangler/dist/worker.js", kvNamespaces,
-    workflows: { INMET_BDMEP: { ...binding, scriptName: "portal-local" } } },
+    workflows: { INMET_BDMEP: { ...binding, scriptName: "portal-local" }, INMET_COLLECTOR: tableBinding },
+    serviceBindings: { INMET_BROWSER: { name: "navegador-local" } }, outboundService: rejectOutbound },
   { ...base, name: "portal-local", scriptPath: ".wrangler/bdmep-retry-worker.js",
     compatibilityFlags: ["nodejs_compat"], kvNamespaces, workflows: { BDMEP_FLOW: binding },
     bindings: { BDMEP_ADDRESS: "dados@example.test", BDMEP_BROWSER_ACCOUNT: "0".repeat(32), BDMEP_BROWSER_TOKEN: "fixture" },
@@ -46,14 +103,17 @@ const runtime = new Miniflare(convertV4MiniflareOptions({ workers: [
       return new Response(csv, { headers: { "Content-Type": "text/csv" } });
     } },
   { ...base, name: "navegador-local",
-    script: 'import { WorkerEntrypoint } from "cloudflare:workers"; let attempts=0; export default class extends WorkerEntrypoint { async quickAction(action, request) { if (action !== "content" || request.url !== "https://bdmep.inmet.gov.br/confirmacao/fixture") throw new Error("Confirmação inesperada"); attempts++; return Response.json({success:true,result:attempts===1?"Servidor indisponível":"<div>Sua requisição foi confirmada e está na fila para ser processada!</div>"}); } }' }
+    script: browserFixture, outboundService: rejectOutbound }
 ]}));
 try {
   const api = await runtime.getWorker("consulta-local");
+  const browser = await runtime.getWorker("navegador-local");
+  const stats = async () => (await browser.fetch("http://fixture.test/counts")).json();
+  const { INMET_COLLECTOR: tableFlow } = await runtime.getBindings("consulta-local");
   const { BDMEP_FLOW: flow, INMET_DAYS: kv } = await runtime.getBindings("portal-local");
   const fire = async (ts) => assert.equal((await api.scheduled({ scheduledTime: new Date(ts), cron: "0 * * * *" })).outcome,"ok");
-  async function waitFor(id, predicate) {
-    const job = await flow.get(id);
+  async function waitFor(id, predicate, target = flow) {
+    const job = await target.get(id);
     for (let i=0;i<250;i++) {
       const s = await job.status();
       if (predicate(s)) return { job, s };
@@ -62,9 +122,39 @@ try {
     }
     throw Error("Prazo de teste na instância " + id + ": " + JSON.stringify(await job.status()));
   }
+  // Seed only the catalogue and the previous checkpoint; the cron must index both missing stations.
+  const previous = {
+    id: "tabelas-bancada-anterior", day: tableDay, status: "partial",
+    measuredStations: allStations.filter(station => !testStations.includes(station)),
+    pendingStations: testStations, emptyStations: [],
+  };
+  await kv.put("catalog/portal/v1/bdmep", JSON.stringify({ at: Date.now(), regions: catalog }));
+  await kv.put(surveyDayKey(tableDay), JSON.stringify(previous));
+  await kv.put(surveyActiveKey, JSON.stringify(previous));
   await fire("2026-11-26T08:00:00Z");
   assert.equal(requests.length, 0);
+  assert.deepEqual((await stats()).visits, []);
   await fire("2026-11-26T09:00:00Z");
+  const surveyId = "tabelas-2026-11-26T09";
+  const survey = await waitFor(surveyId, s => s.status === "complete", tableFlow);
+  assert.deepEqual(survey.s.output, { id: surveyId, day: tableDay, status: "complete", reason: null,
+    planned: 668, measured: 668, empty: 0, remaining: 0, catalogSource: "bdmep-cache", authoritative: true });
+  const coverage = await kv.get(surveyDayKey(tableDay), "json");
+  assert.equal(coverage.attempts, 2);
+  assert.deepEqual([...coverage.measuredStations].sort(), allStations);
+  assert.deepEqual(coverage.pendingStations, []);
+  for (const station of testStations) {
+    const result = await api.fetch("http://consulta.test/v1/observations?station=" + station + "&date=" + tableDay + "&fields=all");
+    assert.equal(result.status, 200);
+    assert.equal(result.headers.get("X-INMET-Source"), "portal");
+    assert.equal(result.headers.get("X-INMET-Observed-Hours"), "1");
+    const rows = await result.json();
+    assert.deepEqual([rows[3].temperature_c, rows[3].wind_gust_m_s], tableValues[station]);
+    assert.equal(rows[3].recorded, true);
+    assert.equal(rows[4].recorded, false);
+  }
+  await fire("2026-11-26T09:00:00Z");
+  assert.deepEqual(await stats(), { visits: testStations, closed: ["local-session"], quotaProbes: 0 });
   const first = await waitFor("bdmep-janela-2026-11-26T09",s=>s.status==="errored");
   assert.match(first.s.error.message,/Catálogo/);
   assert.equal(await kv.get(mailboxState), null);
@@ -101,5 +191,13 @@ try {
   assert.equal(formCalls,callsBeforeRecovery);
   assert.equal(recovery.s.output.stations,2);
   assert.equal(await kv.get(mailboxState),null);
+  const cooldown = await kv.get(surveyActiveKey, "json");
+  assert.equal(cooldown.status, "waiting");
+  assert.equal(cooldown.reason, "rate_limited");
+  assert.equal(cooldown.remaining, 668);
+  assert.deepEqual(await stats(), { visits: testStations, closed: ["local-session"], quotaProbes: 1 });
   console.log(JSON.stringify({failedWindow:first.s.status,nextWindow:second.s.status,deliveryFailure:failedDelivery.s.status,recoveredDelivery:recovery.s.status,stations:2,formCalls,downloads,duplicateSubmissions:0,officialApiCalls:0}));
+  console.log(JSON.stringify({ tableWorkflow: survey.s.status, catalogue: coverage.planned,
+    previouslyMeasured: previous.measuredStations.length, indexed: coverage.attempts,
+    coverageAfter: coverage.measured, remaining: coverage.remaining, quotaProbes: 1 }));
 } finally { await runtime.dispose(); }

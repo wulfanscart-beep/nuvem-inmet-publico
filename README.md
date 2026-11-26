@@ -1,9 +1,11 @@
 # Nuvem-INMET
 
-O sistema Cloudflare reúne as 17 variáveis horárias das estações automáticas
-pelo formulário público do BDMEP. A coleta, o recebimento por e-mail,
-a compactação e as consultas rodam no Cloudflare, com janelas de cinco horas.
-Veja [operação, implantação e consultas](cloudflare/README.md).
+O Nuvem-INMET reúne as medições horárias das estações automáticas do Brasil
+e permite consultar até 17 variáveis por estação e dia. O Worker percorre
+o catálogo de estações, abre a tabela oficial de cada uma no navegador
+do Cloudflare e guarda as medições no Workers KV. Em paralelo, o BDMEP
+pode fornecer um arquivo nacional para completar a cobertura.
+[Operação, implantação e consultas](cloudflare/README.md)
 
 ## Acervo Python local
 
@@ -205,8 +207,9 @@ cobrem bytes de consultas sob demanda. [Preços do BigQuery](https://cloud.googl
 A API pública consulta uma estação e um dia em JSON ou CSV. É possível
 selecionar temperatura, umidade, vento, chuva, pressão, radiação e
 ponto de orvalho, incluindo as máximas e mínimas horárias disponíveis.
-O Worker coleta diariamente às 05h de Brasília e publica um lote por dia
-no Workers KV. [API e operação](cloudflare/README.md)
+O Worker publica as tabelas por estação conforme a coleta avança. A cobertura
+de cada dia depende das medições disponíveis no INMET e do tempo de navegador
+da conta. [API e operação](cloudflare/README.md)
 
 ## Documentação
 

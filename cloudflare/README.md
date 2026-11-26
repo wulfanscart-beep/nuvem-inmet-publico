@@ -1,9 +1,9 @@
 # Nuvem-INMET no Cloudflare
 
-A coleta nacional roda **a cada cinco horas pelo formulário público do BDMEP**.
-O Cloudflare pede um arquivo das estações automáticas, recebe o retorno do
-INMET por e-mail e grava no Workers KV um índice por dia UTC.
-A operação roda na conta Cloudflare. O GitHub guarda o código e este guia.
+O sistema coleta **as tabelas horárias das estações automáticas** e mantém
+uma segunda fonte, o arquivo nacional do BDMEP. O próprio Cloudflare executa
+o navegador, organiza as tentativas e grava as observações no Workers KV.
+Cada consulta identifica uma estação e um dia UTC.
 
 ## Consultar
 
@@ -38,7 +38,8 @@ são ao nível da estação. A radiação horária está em kJ/m².
 As consultas leem primeiro os lotes históricos em `observations/v2/`.
 Para datas coletadas pelo BDMEP, o arquivo nacional aparece assim
 que o Worker termina a indexação. Quando já existe uma tabela individual
-do portal, a consulta conserva suas horas e completa as demais pelo BDMEP.
+do portal, a consulta preserva suas medições e usa o BDMEP para preencher
+as horas ou variáveis solicitadas que ainda estejam vazias.
 `X-INMET-Source` identifica o canal `portal`, `bdmep` ou `wis2`.
 `X-INMET-Coverage` e `X-INMET-Observed-Hours` informam a cobertura da estação.
 Consumidores que aceitam a contingência WIS2 podem adicionar `fallback=wis2`.
@@ -46,6 +47,39 @@ Consumidores que aceitam a contingência WIS2 podem adicionar `fallback=wis2`.
 [Catálogo da API](http://127.0.0.1:8787/v1/fields) · [Fonte INMET](https://portal.inmet.gov.br/dadoshistoricos)
 
 ## Coleta e armazenamento
+
+### Tabelas por estação
+
+O coletor principal percorre o catálogo das cinco regiões. Para cada estação
+e dia, o Browser Run abre a página pública da tabela. A própria página faz
+a solicitação horária. O coletor aguarda a chegada do corpo, confere o código,
+o dia e a hora de cada registro e aproveita os valores antes do arredondamento
+da tela. Uma linha vazia permanece como lacuna. Vento ou precipitação com
+valor zero são medições válidas. Se o catálogo estiver indisponível, o
+coletor usa a última lista válida ou a lista distribuída com o código e
+identifica a cobertura como provisória.
+
+A sessão de navegador é reutilizada dentro do lote e encerrada ao fim.
+O progresso fica no KV da implantação sob `portal/survey/v1/active`.
+Se a origem ou o Browser Run informar HTTP 429, o coletor respeita o prazo
+de `Retry-After`. A disponibilidade do portal, o tempo de navegador contratado
+e a quantidade de estações determinam quanto da rede pode ser coberto em
+uma rodada. [Tabela pública de exemplo](https://tempo.inmet.gov.br/tabela/mapa/A040/2026-11-26) · [Browser Run](https://developers.cloudflare.com/browser-run/script/)
+
+Para acompanhar a execução pela sua conta Cloudflare, consulte o estado do
+coletor no diretório `cloudflare/` com a configuração local da implantação.
+
+```bash
+npx wrangler kv key get portal/survey/v1/active --binding INMET_DAYS --remote --text --config wrangler.local.jsonc
+```
+
+`planned` conta as estações do catálogo e `measured` conta as que forneceram
+ao menos uma medição. `remaining` indica quantas ainda precisam de dados.
+Em uma pausa, `reason`, `lastError` e `resumeAt` permitem distinguir a causa
+e consultar o horário previsto para a retomada. Para conferir as horas de uma
+estação específica, consulte `/v1/observations` e `X-INMET-Observed-Hours`.
+
+### Arquivo nacional do BDMEP
 
 O Cron roda no início de cada hora UTC. Nas janelas de cinco horas corridas,
 contadas a partir de 25/11/2026 às 13h UTC, o Worker confere o acervo e
@@ -90,10 +124,9 @@ com os decimais da fonte. A publicação grava um lote em
 o ZIP do dia já estiver no KV, a janela pode indexá-lo diretamente.
 [Portal oficial BDMEP](https://bdmep.inmet.gov.br/)
 
-O acervo histórico `observations/v2/`, a tabela por estação e os lotes
-WIS2 já recebidos continuam disponíveis pelas rotas de consulta. O
-Workflow anterior `nuvem-inmet-daily` permanece disponível para
-importações explícitas. O Cron aciona exclusivamente `nuvem-inmet-bdmep`.
+As rotas de consulta também servem o acervo histórico em `observations/v2/`
+e os lotes WIS2 já recebidos. O agendador utiliza `INMET_COLLECTOR` para
+as tabelas e `INMET_BDMEP` para o arquivo nacional.
 
 A contingência WIS2 usa o mesmo formato binário, na chave
 `observations/wis2/v1/AAAA-MM-DD.bin`. Ela verifica unidades e intervalos
@@ -127,8 +160,8 @@ duplicados. Ele não envia solicitações reais ao INMET nem publica Workers.
 ## Publicação e acompanhamento
 
 No diretório `cloudflare/`, use Node.js 22 ou superior e a versão
-fixada do Wrangler. A configuração pública não contém identificadores,
-endereços de recebimento ou credenciais de uma implantação.
+fixada do Wrangler. Os arquivos de exemplo incluem os nomes lógicos dos
+recursos que cada instalador configura na própria conta.
 
 ```bash
 npm ci
@@ -149,6 +182,10 @@ npx wrangler kv namespace create INMET_DAYS
 Preencha o mesmo ID de KV nas duas cópias. Ajuste nelas os nomes de Worker
 e Workflow, incluindo a referência `script_name`, se os nomes de exemplo
 já estiverem ocupados na conta. Em Bash, use `cp` no lugar de `Copy-Item`.
+
+O Worker principal usa o binding de navegador `INMET_BROWSER` para obter
+as tabelas. Essa integração usa as permissões do próprio Worker. Confira
+o tempo de Browser Run disponível na conta. [Preços e limites do Browser Run](https://developers.cloudflare.com/browser-run/pricing/)
 
 No coletor BDMEP, configure em `vars` da cópia local o endereço exclusivo
 `BDMEP_ADDRESS` e a conta `BDMEP_BROWSER_ACCOUNT`. Roteie esse endereço

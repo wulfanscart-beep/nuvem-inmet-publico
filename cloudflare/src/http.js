@@ -1,7 +1,7 @@
 import { batchKey, readBatch } from './batches.js';
 
 import { defaultFields, fieldPositions, fields } from './fields.js';
-import { bdmepKey, packedKey, portalKey, readPackedStation, stationCode, wis2Key } from './packed.js';
+import { bdmepKey, mirrorKey, packedKey, portalKey, readPackedStation, stationCode, wis2Key } from './packed.js';
 const allFields = fields.map(({ name }) => name);
 
 function response(body, type, status = 200, headers = {}) {
@@ -87,6 +87,20 @@ function coverageHeaders(source, hours, coverage = 'partial') {
   };
 }
 
+function missingValues(hours, selected) {
+  return !hours || hours.size < 24 || [...hours.values()].some(row =>
+    selected.some(name => row[fieldPositions.get(name)] === null));
+}
+
+function fillMissing(hours, reports) {
+  if (!hours?.size) return reports;
+  for (const [hour, row] of reports) {
+    const primary = hours.get(hour);
+    hours.set(hour, primary ? primary.map((value, index) => value ?? row[index]) : row);
+  }
+  return hours;
+}
+
 export async function handleRequest(request, env) {
   const url = new URL(request.url);
   if (!['/health', '/v1/observations', '/v1/fields'].includes(url.pathname)) {
@@ -146,23 +160,38 @@ export async function handleRequest(request, env) {
       }
     }
     const fromPortal = headers?.['X-INMET-Source'] === 'portal';
-    const portalHasGaps = fromPortal && (hours.size < 24 || [...hours.values()].some(row =>
-      selected.some(name => row[fieldPositions.get(name)] === null)));
+    const portalHasGaps = fromPortal && missingValues(hours, selected);
     if (env?.INMET_DAYS && (!hours?.size || portalHasGaps)) {
       const bdmep = await env.INMET_DAYS.get(bdmepKey(day), 'arrayBuffer');
       if (bdmep !== null) {
         officialDayExists = true;
         const reports = await readPackedStation(bdmep, day, station);
         if (reports.size > 0) {
-          if (fromPortal) {
-            for (const [hour, row] of reports) {
-              const primary = hours.get(hour);
-              hours.set(hour, primary ? primary.map((value, index) => value ?? row[index]) : row);
-            }
-          } else {
-            hours = reports;
-          }
+          hours = fillMissing(hours, reports);
           headers = coverageHeaders(fromPortal ? 'portal' : 'bdmep', hours, hours.size === 24 ? 'complete' : 'partial');
+        }
+      }
+    }
+    const from = headers?.['X-INMET-Source'];
+    if (env?.INMET_DAYS && (!hours?.size || (from && missingValues(hours, selected)))) {
+      const mirror = await env.INMET_DAYS.get(mirrorKey(day), 'arrayBuffer');
+      if (mirror !== null) {
+        officialDayExists = true;
+        const reports = await readPackedStation(mirror, day, station);
+        const improves = [...reports].some(([hour, row]) => {
+          const known = hours?.get(hour);
+          return !known || selected.some(name => {
+            const position = fieldPositions.get(name);
+            return known[position] === null && row[position] !== null;
+          });
+        });
+        if (improves) {
+          hours = fillMissing(hours, reports);
+          headers = coverageHeaders(from ?? 'agencia-sertao', hours, hours.size === 24 ? 'complete' : 'partial');
+          if (from) {
+            headers['X-INMET-Supplement'] = 'agencia-sertao';
+            headers['Access-Control-Expose-Headers'] += ', X-INMET-Supplement';
+          }
         }
       }
     }

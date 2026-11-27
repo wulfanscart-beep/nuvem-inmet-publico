@@ -7,6 +7,7 @@ const maxSourceBytes = 25 * 1024 * 1024;
 const rawLifetime = 12 * 60 * 60;
 const storageRetry = { retries: { limit: 3, delay: "20 seconds", backoff: "exponential" } };
 const sourceRetry = { retries: { limit: 2, delay: "2 minutes", backoff: "exponential" } };
+const scheduledSource = { retries: { limit: 0, delay: "1 second" } };
 
 export function stagedKey(day) {
   packedKey(day);
@@ -71,7 +72,7 @@ export async function collectPackedDay(params, kv, step, fetcher = fetch) {
   if (existing) return { day, status: "already_stored" };
 
   if (!useStaged) {
-    await step.do("receber INMET", sourceRetry, async () => {
+    await step.do("receber INMET", params.mode === "direct" ? scheduledSource : sourceRetry, async () => {
       const response = await fetchInmetResponse(day, { fetcher });
       if (!response.body || Number(response.headers.get("content-length")) > maxSourceBytes) {
         await response.body?.cancel();

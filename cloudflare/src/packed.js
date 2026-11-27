@@ -24,6 +24,11 @@ export function wis2Key(day) {
   return "observations/wis2/v1/" + day + ".bin";
 }
 
+export function mirrorKey(day) {
+  batchKey(day);
+  return "observations/mirror/v1/" + day + ".bin";
+}
+
 export function bdmepKey(day) {
   batchKey(day);
   return bdmepPrefix + day + ".bin";

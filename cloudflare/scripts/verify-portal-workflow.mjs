@@ -7,7 +7,7 @@ await writeFile(".wrangler/bdmep-retry-worker.js",fast);
 import { setTimeout as delay } from "node:timers/promises";
 import { Miniflare, convertV4MiniflareOptions, Response } from "miniflare";
 import { bdmepKey, stagedBdmepKey } from "../src/packed.js";
-import { mailboxState } from "../src/schedule.js";
+import { mailboxState, scheduleCollection, scheduleStationTables } from "../src/schedule.js";
 import { bdmepVariables } from "../src/bdmep-form.js";
 import { surveyActiveKey, surveyDayKey } from "../src/station-survey.js";
 import snapshot from "../src/station-catalog-snapshot.json" with { type: "json" };
@@ -23,6 +23,9 @@ const tableBinding = { name: "tabelas-locais", className: "InmetDailyCollection"
 const tableDay = "2026-11-26";
 const testStations = ["A040", "A807"];
 const tableValues = { A040: ["24.90", "4.5"], A807: ["21.30", "0.0"] };
+const mirrorDay = "2026-11-27";
+const mirrorBinding = { name: "espelho-local", className: "InmetDailyCollection" };
+const mirrorRequests = [];
 const regions = {
   N: "AC AP AM PA RO RR TO", NO: "AL BA CE MA PB PE PI RN SE",
   SU: "ES MG RJ SP", S: "PR RS SC", CO: "DF GO MT MS",
@@ -81,6 +84,26 @@ let formCalls = 0;
 let downloads = 0;
 let deliveryBlocked = false;
 const runtime = new Miniflare(convertV4MiniflareOptions({ workers: [
+  { ...base, name: "consulta-http", scriptPath: ".wrangler/dist/worker.js",
+    kvNamespaces: { INMET_DAYS: "kv-http-isolado" }, workflows: { INMET_COLLECTOR: mirrorBinding },
+    async outboundService(req) {
+      const url = new URL(req.url);
+      assert.equal(url.origin, "https://agenciasertao.com");
+      const path = url.searchParams.get("path");
+      mirrorRequests.push(path);
+      if (path === "catalogo.json") return Response.json({
+        schema: "agencia-sertao/estacoes-inmet@1", generated_at: mirrorDay + "T09:14:00Z", count: 1,
+        stations: [{ code: "A843", type: "automaticas", entity: "INMET", updated_at: mirrorDay + "T09:00",
+          current: { temperature: 21.9, gust: 14 }, csv_url: "csv/automaticas/A843.csv",
+          periods: { "7d": { observations: 2 } } }],
+      });
+      assert.equal(path, "csv/automaticas/A843.csv");
+      return new Response([
+        "Codigo Estacao: A843",
+        ["Data Medicao", "Hora Medicao", ...names].join(";"),
+        [tableDay, "2300", ...names.map(k => k === "TEM_INS" ? "21,90" : k === "VEN_RAJ" ? "14,0" : "")].join(";"),
+      ].join("\n"));
+    } },
   { ...base, name: "consulta-local", scriptPath: ".wrangler/dist/worker.js", kvNamespaces,
     workflows: { INMET_BDMEP: { ...binding, scriptName: "portal-local" }, INMET_COLLECTOR: tableBinding },
     serviceBindings: { INMET_BROWSER: { name: "navegador-local" } }, outboundService: rejectOutbound },
@@ -111,7 +134,9 @@ try {
   const stats = async () => (await browser.fetch("http://fixture.test/counts")).json();
   const { INMET_COLLECTOR: tableFlow } = await runtime.getBindings("consulta-local");
   const { BDMEP_FLOW: flow, INMET_DAYS: kv } = await runtime.getBindings("portal-local");
-  const fire = async (ts) => assert.equal((await api.scheduled({ scheduledTime: new Date(ts), cron: "0 * * * *" })).outcome,"ok");
+  const fire = async ts => {
+    await Promise.all([scheduleCollection(Date.parse(ts), kv, flow), scheduleStationTables(Date.parse(ts), kv, tableFlow)]);
+  };
   async function waitFor(id, predicate, target = flow) {
     const job = await target.get(id);
     for (let i=0;i<250;i++) {
@@ -122,6 +147,20 @@ try {
     }
     throw Error("Prazo de teste na instância " + id + ": " + JSON.stringify(await job.status()));
   }
+  const direct = await runtime.getWorker("consulta-http");
+  const { INMET_COLLECTOR: httpWorkflow } = await runtime.getBindings("consulta-http");
+  const slot = mirrorDay + "T10";
+  for (let i = 0; i < 2; i++) {
+    const trigger = await direct.scheduled({ scheduledTime: new Date(slot + ":00:00Z"), cron: "0 * * * *" });
+    assert.equal(trigger.outcome, "ok");
+  }
+  const collected = await waitFor("inmet-espelho-" + slot, s => s.status === "complete", httpWorkflow);
+  assert.equal(collected.s.output.stationFiles, 1);
+  assert.deepEqual(mirrorRequests, ["catalogo.json", "csv/automaticas/A843.csv"]);
+  const result = await direct.fetch("http://consulta.test/v1/observations?station=A843&date=" + tableDay + "&fields=all");
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get("X-INMET-Source"), "agencia-sertao");
+  assert.equal((await result.json())[23].wind_gust_m_s, "14.0");
   // Seed only the catalogue and the previous checkpoint; the cron must index both missing stations.
   const previous = {
     id: "tabelas-bancada-anterior", day: tableDay, status: "partial",

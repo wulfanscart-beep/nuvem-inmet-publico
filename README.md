@@ -1,11 +1,9 @@
 # Nuvem-INMET
 
-O Nuvem-INMET reúne as medições horárias das estações automáticas do Brasil
-e permite consultar até 17 variáveis por estação e dia. O Worker percorre
-o catálogo de estações, abre a tabela oficial de cada uma no navegador
-do Cloudflare e guarda as medições no Workers KV. Em paralelo, o BDMEP
-pode fornecer um arquivo nacional para completar a cobertura.
-[Operação, implantação e consultas](cloudflare/README.md)
+O Nuvem-INMET reúne observações horárias das estações automáticas do Brasil.
+O Worker consulta por HTTP o Portal Tempo da Agência Sertão, que republica
+as medições do INMET. Os lotes oficiais também são usados na recuperação
+das lacunas. [Operação, implantação e consultas](cloudflare/README.md)
 
 ## Acervo Python local
 
@@ -204,12 +202,11 @@ cobrem bytes de consultas sob demanda. [Preços do BigQuery](https://cloud.googl
 
 ## Nuvem-INMET no Cloudflare
 
-A API pública consulta uma estação e um dia em JSON ou CSV. É possível
-selecionar temperatura, umidade, vento, chuva, pressão, radiação e
-ponto de orvalho, incluindo as máximas e mínimas horárias disponíveis.
-O Worker publica as tabelas por estação conforme a coleta avança. A cobertura
-de cada dia depende das medições disponíveis no INMET e do tempo de navegador
-da conta. [API e operação](cloudflare/README.md)
+A API pública oferece até 17 variáveis em JSON ou CSV por estação e dia,
+incluindo temperatura, umidade, vento, chuva, pressão, radiação e ponto de
+orvalho. A cada cinco horas o Worker atualiza as últimas medições do espelho
+e completa os dias recentes com os CSVs horários disponíveis. As consultas
+identificam a origem e a cobertura da estação. [API e operação](cloudflare/README.md)
 
 ## Documentação
 

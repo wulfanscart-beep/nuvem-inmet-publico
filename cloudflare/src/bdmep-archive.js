@@ -83,7 +83,7 @@ function readHeader(bytes) {
   throw new Error("Cabeçalho horário do BDMEP não encontrado.");
 }
 
-function parseCsv(bytes, day, table, start, end) {
+function csvInputs(bytes, table, start, end, expectedDay) {
   const inputs = [];
   for (const line of decode(bytes.subarray(start, end)).split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -97,12 +97,35 @@ function parseCsv(bytes, day, table, start, end) {
       ? row[table.date].split("/").reverse().join("-")
       : row[table.date].replaceAll("/", "-");
     const clock = row[table.hour].match(/^([01]\d|2[0-3])(?::?00)(?::00)?(?:\s*UTC)?$/i);
-    if (!station || !clock || date !== day) throw new Error("Estação, dia ou horário UTC inválido no BDMEP.");
+    if (!station || !clock || (expectedDay && date !== expectedDay)) {
+      throw new Error("Estação, dia ou horário UTC inválido no CSV.");
+    }
     const values = Object.fromEntries(table.columns.map(([index, source]) => [source, row[index].replace(",", ".")]));
     inputs.push({ CD_ESTACAO: station, DT_MEDICAO: date, HR_MEDICAO: clock[1] + "00", ...values });
   }
-  return inputs.length ? normalizeInmetInputs(inputs, day, { extended: true, sort: false })
-    .filter(row => row.some((value, index) => index >= 2 && value !== null)) : [];
+  return inputs;
+}
+
+function measuredRows(inputs, day) {
+  return normalizeInmetInputs(inputs, day, { extended: true, sort: false })
+    .filter(row => row.slice(2).some(value => value !== null));
+}
+
+function parseCsv(bytes, day, table, start, end) {
+  return measuredRows(csvInputs(bytes, table, start, end, day), day);
+}
+
+export function readStationArchiveCsv(bytes, station, expectedDays) {
+  const table = readHeader(bytes);
+  const byDay = new Map();
+  for (const input of csvInputs(bytes, table, table.start, bytes.length)) {
+    if (input.CD_ESTACAO !== station) throw new Error("Identidade da estação divergente no CSV.");
+    const day = input.DT_MEDICAO;
+    if (!expectedDays.has(day)) continue;
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(input);
+  }
+  return [...byDay].map(([day, inputs]) => [day, measuredRows(inputs, day)]);
 }
 
 function zipEntries(bytes) {

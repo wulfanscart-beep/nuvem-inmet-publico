@@ -1,9 +1,8 @@
 # Nuvem-INMET no Cloudflare
 
-O sistema coleta **as tabelas horárias das estações automáticas** e mantém
-uma segunda fonte, o arquivo nacional do BDMEP. O próprio Cloudflare executa
-o navegador, organiza as tentativas e grava as observações no Workers KV.
-Cada consulta identifica uma estação e um dia UTC.
+O sistema reúne observações horárias das estações automáticas do INMET.
+O Cloudflare consulta arquivos públicos via HTTP a cada cinco horas,
+indexa as medições no Workers KV e oferece consultas por estação e dia UTC.
 
 ## Consultar
 
@@ -35,189 +34,77 @@ não contém registro para aquela hora.
 ausente num dia existente. A precipitação é a da hora. Os valores de pressão
 são ao nível da estação. A radiação horária está em kJ/m².
 
-As consultas leem primeiro os lotes históricos em `observations/v2/`.
-Para datas coletadas pelo BDMEP, o arquivo nacional aparece assim
-que o Worker termina a indexação. Quando já existe uma tabela individual
-do portal, a consulta preserva suas medições e usa o BDMEP para preencher
-as horas ou variáveis solicitadas que ainda estejam vazias.
-`X-INMET-Source` identifica o canal `portal`, `bdmep` ou `wis2`.
-`X-INMET-Coverage` e `X-INMET-Observed-Hours` informam a cobertura da estação.
-Consumidores que aceitam a contingência WIS2 podem adicionar `fallback=wis2`.
+As consultas dão prioridade aos lotes oficiais e às medições do portal
+já indexadas. O espelho completa horas e campos ausentes. Para respostas
+do espelho, `X-INMET-Source` indica `agencia-sertao`. Quando o espelho
+complementa uma resposta do portal ou do BDMEP, o cabeçalho
+`X-INMET-Supplement` identifica seu uso. `X-INMET-Coverage` e
+`X-INMET-Observed-Hours` descrevem a cobertura horária da estação.
+Consumidores que aceitam a contingência WIS2 podem usar `fallback=wis2`.
 
 [Catálogo da API](http://127.0.0.1:8787/v1/fields) · [Fonte INMET](https://portal.inmet.gov.br/dadoshistoricos)
 
 ## Coleta e armazenamento
 
-### Tabelas por estação
+O Cron verifica janelas de cinco horas corridas contadas a partir de
+25/11/2026 às 13h UTC. Cada janela cria apenas uma instância do espelho.
+O Worker consulta por HTTPS o catálogo nacional do Portal Tempo da Agência
+Sertão, que republica observações do INMET. O catálogo traz a última medição
+disponível por estação. O sistema lê, em ordem rotativa, até 24 CSVs públicos
+por janela para completar a série horária dos oito dias UTC mais recentes.
+As consultas dos CSVs são seriais, com quatro segundos entre elas.
+[Estações do Portal Tempo](https://agenciasertao.com/tempo/estacoes/) · [Metodologia do Portal Tempo](https://agenciasertao.com/tempo/metodologia/)
 
-O coletor principal percorre o catálogo das cinco regiões. Para cada estação
-e dia, o Browser Run abre a página pública da tabela. A própria página faz
-a solicitação horária. O coletor aguarda a chegada do corpo, confere o código,
-o dia e a hora de cada registro e aproveita os valores antes do arredondamento
-da tela. Uma linha vazia permanece como lacuna. Vento ou precipitação com
-valor zero são medições válidas. Se o catálogo estiver indisponível, o
-coletor usa a última lista válida ou a lista distribuída com o código e
-identifica a cobertura como provisória.
+O Workflow usa o código da estação, a data UTC, os 17 campos e as unidades
+do CSV. Ele preserva a precisão decimal dos arquivos, mantém medições
+anteriores quando a fonte omite um campo e guarda os dados em
+`observations/mirror/v1/AAAA-MM-DD.bin`. O índice NIM2 tem 10 bytes de
+cabeçalho, entradas de 9 bytes por estação e um bloco gzip por estação.
+O estado no KV guarda o último código visitado e o ETag do catálogo.
+HTTP 304 reaproveita a lista. HTTP 401, 403 ou 429 pausa a origem e
+segue o prazo informado em `Retry-After`. As demais falhas aparecem no
+resultado da rodada. A cobertura depende das estações com série recente
+no espelho e aumenta à medida que os CSVs são lidos.
 
-A sessão de navegador é reutilizada dentro do lote e encerrada ao fim.
-O progresso fica no KV da implantação sob `portal/survey/v1/active`.
-Se a origem ou o Browser Run informar HTTP 429, o coletor respeita o prazo
-de `Retry-After`. A disponibilidade do portal, o tempo de navegador contratado
-e a quantidade de estações determinam quanto da rede pode ser coberto em
-uma rodada. [Tabela pública de exemplo](https://tempo.inmet.gov.br/tabela/mapa/A040/2026-11-26) · [Browser Run](https://developers.cloudflare.com/browser-run/script/)
+Em uma a cada cinco janelas, a recuperação tenta a rota nacional do próprio
+INMET para uma lacuna dos últimos 30 dias. A recuperação dá vez às datas
+anteriores para que uma falha persistente em um dia não prenda a fila.
+Os lotes oficiais têm precedência. Se a requisição nacional falhar, o WIS2
+oficial pode preencher séries parciais. O WIS2 usa os códigos WIGOS
+vinculados ao cadastro por nome e coordenadas e continua disponível
+mediante `fallback=wis2`. [Observações automáticas no WIS2](https://wis2bra.inmet.gov.br/oapi/collections/urn:wmo:md:br-inmet:synop) · [Dados históricos oficiais](https://portal.inmet.gov.br/dadoshistoricos)
 
-Para acompanhar a execução pela sua conta Cloudflare, consulte o estado do
-coletor no diretório `cloudflare/` com a configuração local da implantação.
-
-```bash
-npx wrangler kv key get portal/survey/v1/active --binding INMET_DAYS --remote --text --config wrangler.local.jsonc
-```
-
-`planned` conta as estações do catálogo e `measured` conta as que forneceram
-ao menos uma medição. `remaining` indica quantas ainda precisam de dados.
-Em uma pausa, `reason`, `lastError` e `resumeAt` permitem distinguir a causa
-e consultar o horário previsto para a retomada. Para conferir as horas de uma
-estação específica, consulte `/v1/observations` e `X-INMET-Observed-Hours`.
-
-### Arquivo nacional do BDMEP
-
-O Cron roda no início de cada hora UTC. Nas janelas de cinco horas corridas,
-contadas a partir de 25/11/2026 às 13h UTC, o Worker confere o acervo e
-pode abrir **um único pedido** no BDMEP. Enquanto um pedido aguarda
-confirmação ou arquivo, o agendamento aguarda. Uma entrega repetida do Cron
-reutiliza o identificador da janela.
-
-Às 08h UTC (05h de Brasília), o dia anterior passa a ser elegível para
-fechamento. A prioridade é o dia elegível mais recente. A partir desse
-horário, o sistema pode também colher o dia corrente uma vez, em caráter
-provisório. Depois vêm o dia anterior ao último elegível e a lacuna mais
-antiga dos últimos 30 dias. Um lote nacional definitivo já indexado por
-qualquer dos dois formatos encerra a pendência. Uma estação individual
-indexada ou uma contingência parcial continua permitindo a coleta nacional.
-
-O índice `NIM2` tem 10 bytes. São a assinatura, o dia UTC em dias desde
-1970-01-01 e a contagem de estações. Cada entrada ocupa 9 bytes com código
-ASCII de 5 posições e deslocamento de 4 bytes. Inteiros usam ordem de bytes
-big-endian. Cada bloco gzip contém linhas `[hora, ...medições]` com as
-colunas na ordem de [fields.json](src/fields.json).
-
-O Cloudflare Browser Run seleciona a rede automática nacional e verifica
-que o formulário carregou as variáveis e as estações das cinco regiões
-antes de confirmar. Se o portal recusar a navegação ou deixar o catálogo
-vazio, o Workflow espera cinco minutos para repetir o formulário e
-admite outra tentativa dez minutos depois. Se as três tentativas
-falharem antes do envio, libera o recebimento e conserva a pendência
-para a próxima janela. Se a resposta se perder no envio, o Workflow aguarda o recibo por
-e-mail para evitar um segundo pedido. O Cloudflare Email Routing entrega os e-mails do INMET ao
-Worker e o Workflow confirma o pedido e baixa o arquivo oficial da fila.
-A confirmação e o download admitem três novas tentativas com esperas
-de cinco, dez e vinte minutos. Cada retomada usa o mesmo pedido recebido.
-Se essas tentativas se esgotarem, a próxima janela de cinco horas retoma
-a etapa com erro na mesma instância, conservando o recibo e o formulário
-já concluído. A validade original do recebimento não é prorrogada.
-O arquivo fica temporariamente no KV. Em cada execução do indexador,
-uma leitura carrega o ZIP, e cada bloco é validado e compactado no mesmo
-passo. Se o Workflow for retomado, ele pode reler o ZIP para continuar
-do último passo concluído. O índice NIM2 guarda as medições disponíveis
-com os decimais da fonte. A publicação grava um lote em
-`observations/bdmep/v1/AAAA-MM-DD.bin` e remove o ZIP temporário. Se
-o ZIP do dia já estiver no KV, a janela pode indexá-lo diretamente.
+O Worker principal usa Workflows e Workers KV para a coleta e a consulta.
+O indexador independente do BDMEP continua disponível para quem configurar
+a importação pelo portal. As tabelas e os arquivos nacionais já indexados
+permanecem consultáveis pelo mesmo contrato.
 [Portal oficial BDMEP](https://bdmep.inmet.gov.br/)
-
-As rotas de consulta também servem o acervo histórico em `observations/v2/`
-e os lotes WIS2 já recebidos. O agendador utiliza `INMET_COLLECTOR` para
-as tabelas e `INMET_BDMEP` para o arquivo nacional.
-
-A contingência WIS2 usa o mesmo formato binário, na chave
-`observations/wis2/v1/AAAA-MM-DD.bin`. Ela verifica unidades e intervalos
-para temperatura instantânea, máxima e mínima, umidade, vento, rajada,
-direção, pressão da estação, chuva e ponto de orvalho. As demais
-variáveis aparecem como lacunas. Há uma consulta de cobertura e no
-máximo uma transferência CSV por hora. Quando o WIS2 acrescenta dados,
-uma nova tentativa pode ampliar a cobertura publicada.
-
-Os identificadores WIGOS da rede automática vêm do catálogo oficial
-WIS2. O vínculo com os códigos usados na API foi feito por nome
-normalizado e coordenadas a até 100 m no ZIP oficial de 2026. Vínculos
-ambíguos são descartados. Para atualizar o mapa, use um ZIP anual oficial
-e execute na raiz do repositório:
-
-```bash
-python cloudflare/scripts/map-wis2-stations.py data/2026.zip
-```
-
-[Catálogo WIS2 de estações](https://wis2bra.inmet.gov.br/oapi/collections/stations) · [Observações automáticas no WIS2](https://wis2bra.inmet.gov.br/oapi/collections/urn:wmo:md:br-inmet:synop) · [Arquivo oficial do INMET](https://portal.inmet.gov.br/dadoshistoricos)
-
-[Limites de Workers](https://developers.cloudflare.com/workers/platform/limits/) · [Limites de Workflows](https://developers.cloudflare.com/workflows/reference/limits/) · [Limites de KV](https://developers.cloudflare.com/kv/platform/limits/)
 
 ## Verificação do protocolo
 
-`npm run test:workflow` usa Workerd e fontes simuladas para exercitar o
-Cron, o formulário, a confirmação, o download, a indexação e a consulta.
-O ensaio provoca falhas transitórias e verifica a recuperação sem pedidos
-duplicados. Ele não envia solicitações reais ao INMET nem publica Workers.
+`npm run test:workflow` usa Workerd e respostas simuladas. Ele verifica o
+Cron, a coleta HTTP, a publicação e a leitura das medições. Também exercita
+a retomada do fluxo independente de importação do BDMEP.
 
 ## Publicação e acompanhamento
 
-No diretório `cloudflare/`, use Node.js 22 ou superior e a versão
-fixada do Wrangler. Os arquivos de exemplo incluem os nomes lógicos dos
-recursos que cada instalador configura na própria conta.
+No diretório `cloudflare/`, use Node.js 22 ou superior e o Wrangler
+fixado no projeto. Configure o namespace `INMET_DAYS` na conta de destino.
 
 ```bash
 npm ci
 npm test
 npm run test:workflow
 npm run build
-npx wrangler whoami
+npm run deploy
 ```
 
-Copie as configurações para arquivos locais ignorados pelo Git:
-
-```powershell
-Copy-Item wrangler.jsonc wrangler.local.jsonc
-Copy-Item bdmep.wrangler.jsonc bdmep.wrangler.local.jsonc
-npx wrangler kv namespace create INMET_DAYS
-```
-
-Preencha o mesmo ID de KV nas duas cópias. Ajuste nelas os nomes de Worker
-e Workflow, incluindo a referência `script_name`, se os nomes de exemplo
-já estiverem ocupados na conta. Em Bash, use `cp` no lugar de `Copy-Item`.
-
-O Worker principal usa o binding de navegador `INMET_BROWSER` para obter
-as tabelas. Essa integração usa as permissões do próprio Worker. Confira
-o tempo de Browser Run disponível na conta. [Preços e limites do Browser Run](https://developers.cloudflare.com/browser-run/pricing/)
-
-No coletor BDMEP, configure em `vars` da cópia local o endereço exclusivo
-`BDMEP_ADDRESS` e a conta `BDMEP_BROWSER_ACCOUNT`. Roteie esse endereço
-para o coletor usando Cloudflare Email Routing. A credencial exclusiva de
-Browser Run fica como segredo do Worker; informe seu valor somente no
-prompt do Wrangler ou no painel Cloudflare.
-
-```bash
-npx wrangler deploy --config bdmep.wrangler.local.jsonc
-npx wrangler secret put BDMEP_BROWSER_TOKEN --config bdmep.wrangler.local.jsonc
-npx wrangler deploy --config wrangler.local.jsonc
-```
-
-Reutilize as cópias locais nos próximos deploys. O gatilho do Worker de
-consulta chama o Workflow do BDMEP por binding. Os exemplos de consulta
-neste guia usam o servidor local; na publicação, substitua a origem pelo
-endereço informado pelo Wrangler.
-
-Confira `/health`, a leitura de um dia com dados e o Cron `0 * * * *`
-depois da publicação. No painel de Workflows, a janela UTC aparece no fim
-do identificador. Por exemplo, `bdmep-janela-2026-11-26T14` corresponde
-à janela das 11h de Brasília de 26/11. O parâmetro `day` informa o
-dia solicitado. O resultado `indexed`, com a quantidade de estações
-e o tamanho em bytes, confirma que o lote chegou ao índice.
-
-Para diagnosticar o BDMEP, abra a instância do Workflow `nuvem-inmet-bdmep`
-e veja `diagnostics` no resultado da etapa do formulário. Ali ficam
-as fases em ordem, o tempo decorrido e os códigos HTTP que o navegador
-conseguiu ler. Um código vazio indica que o navegador não expôs o status.
-Uma resposta HTTP 4xx ou 5xx encerra a tentativa antes de interagir com a página.
-O Worker também emite eventos `bdmep_coleta` com a fase e a instância em
-`instance`. Os eventos omitem endereços, credenciais e links privados do pedido.
+Depois do deploy, confira a rota `/health`, uma consulta ao acervo e o
+Cron `0 * * * *` no painel do Worker. A janela UTC aparece no final do
+identificador do Workflow. O resultado informa o horário do catálogo,
+a quantidade de estações, a cobertura dos dias publicados e os erros de
+leitura. `indexed` indica uma rodada indexada. `partial` indica que parte
+das leituras precisou ficar para outra janela.
 
 ## Carga histórica
 

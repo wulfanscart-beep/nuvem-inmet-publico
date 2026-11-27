@@ -44,22 +44,7 @@ export async function scheduleCollection(scheduledTime, kv, collector) {
   const days = Array.from({ length: recoveryWindowDays }, (_, offset) =>
     previousUtcDay(eligibleTime - offset * millisecondsPerDay)
   );
-  const months = new Set([today, ...days].map(day => day.slice(0, 7)));
-  const published = new Map();
-  const prefixes = [...months].flatMap(month => [packedPrefix + month + "-", bdmepPrefix + month + "-"]);
-  await Promise.all(prefixes.map(async prefix => {
-    let cursor;
-    do {
-      const page = await kv.list({ prefix, cursor });
-      for (const { name, metadata } of page.keys) {
-        const day = name.slice(-14, -4);
-        if (!name.endsWith(".bin")) continue;
-        const closed = prefix.startsWith(packedPrefix) || !metadata?.provisional;
-        published.set(day, published.get(day) === true || closed);
-      }
-      cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor);
-  }));
+  const published = await publishedDays(kv, [today, ...days]);
 
   const [latest, previous, ...older] = days;
   const candidates = [latest];
@@ -80,6 +65,61 @@ export async function scheduleCollection(scheduledTime, kv, collector) {
   const failure = errors.find(error => error.code !== 10405);
   if (failure) throw new Error("Falha ao agendar BDMEP: " + failure.code);
   return { slot, day, provisional, indexOnly, id, status: created.length ? "scheduled" : "already_scheduled" };
+}
+
+async function publishedDays(kv, days) {
+  const months = new Set(days.map(day => day.slice(0, 7)));
+  const published = new Map();
+  const prefixes = [...months].flatMap(month => [packedPrefix + month + "-", bdmepPrefix + month + "-"]);
+  await Promise.all(prefixes.map(async prefix => {
+    let cursor;
+    do {
+      const page = await kv.list({ prefix, cursor });
+      for (const { name, metadata } of page.keys) {
+        if (!name.endsWith(".bin")) continue;
+        const day = name.slice(-14, -4);
+        const closed = prefix.startsWith(packedPrefix) || !metadata?.provisional;
+        published.set(day, published.get(day) === true || closed);
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  }));
+  return published;
+}
+
+export async function scheduleDirectCollection(scheduledTime, kv, collector) {
+  const slot = collectionSlot(scheduledTime);
+  if (!slot) return null;
+  const time = Date.parse(slot + ":00:00Z");
+  const sequence = (time - firstCollection) / collectionInterval;
+  if (sequence % 5 !== 0) return null;
+  const days = Array.from({ length: recoveryWindowDays }, (_, offset) =>
+    previousUtcDay(time - previousDayRelease - offset * millisecondsPerDay)
+  );
+  const published = await publishedDays(kv, days);
+  const [recent, ...earlier] = days;
+  const round = sequence / 5;
+  const missing = earlier.filter(day => published.get(day) !== true);
+  const older = missing.length ? missing[Math.floor(round / 2) % missing.length] : undefined;
+  const latest = published.get(recent) === true ? undefined : recent;
+  const day = (round % 2 ? older ?? latest : latest ?? older);
+  if (!day) return { slot, status: "up_to_date" };
+  return dispatchCollection(collector, "inmet-http-" + slot, { mode: "direct", day, slot });
+}
+
+export async function scheduleMirrorCollection(scheduledTime, collector) {
+  const slot = collectionSlot(scheduledTime);
+  if (!slot) return null;
+  return dispatchCollection(collector, "inmet-espelho-" + slot, { mode: "mirror", slot });
+}
+
+async function dispatchCollection(collector, id, params) {
+  const { created, errors } = await collector.createBatch({
+    instances: [{ id, params }],
+  });
+  const failure = errors.find(error => error.code !== 10405);
+  if (failure) throw new Error("Falha ao agendar coleta HTTP do INMET: " + failure.code);
+  return { ...params, id, status: created.length ? "scheduled" : "already_scheduled" };
 }
 
 const surveyDispatchKey = "portal/survey/v1/dispatch";

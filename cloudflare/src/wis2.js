@@ -9,6 +9,7 @@ const pageLimit = 10_000;
 const maxStepBytes = 950_000;
 const linesPerStep = 512;
 const oneAttempt = { retries: { limit: 0, delay: "1 second" } };
+const originPause = 24 * 60 * 60 * 1000;
 const decimal = /^[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i;
 const rules = new Map([
   ["air_temperature", ["temperature_c", "Celsius", 0]],
@@ -22,6 +23,32 @@ const rules = new Map([
   ["maximum_temperature_at_height_and_over_period_specified", ["temperature_max_c", "Celsius", 60]],
   ["minimum_temperature_at_height_and_over_period_specified", ["temperature_min_c", "Celsius", 60]],
 ].map(([source, [name, unit, minutes]]) => [source, [fieldPositions.get(name) + 1, unit, minutes]]));
+
+export function fetchWithOriginPause(kv, fetcher) {
+  const pauses = new Map();
+  return async (url, options) => {
+    const host = new URL(url).hostname;
+    const key = "collect/http/v1/pause/" + host;
+    if (!pauses.has(host)) pauses.set(host, await kv.get(key, "json"));
+    const pause = pauses.get(host);
+    const now = Date.now();
+    if (pause?.until > now) {
+      throw new Error(host + " em pausa por HTTP " + pause.status + " até " + new Date(pause.until).toISOString() + ".");
+    }
+    const response = await fetcher(url, options);
+    if ([401, 403, 429].includes(response.status)) {
+      const after = response.headers.get("Retry-After")?.trim();
+      const until = after && /^\d+$/.test(after)
+        ? now + Number(after) * 1000
+        : Date.parse(after ?? "");
+      const delay = Number.isFinite(until) && until >= now && until <= 8.64e15 ? until - now : originPause;
+      const paused = { status: response.status, until: now + delay };
+      pauses.set(host, paused);
+      await kv.put(key, JSON.stringify(paused), { expirationTtl: Math.max(60, Math.ceil(delay / 1000)) });
+    }
+    return response;
+  };
+}
 
 async function readWis2(params, fetcher) {
   const url = new URL(endpoint);
@@ -176,12 +203,20 @@ export async function collectWis2Day(day, kv, step, fetcher = fetch) {
 }
 
 export async function collectAvailableDay(params, kv, step, fetcher = fetch) {
+  if (params.mode === "direct" && !params.useStaged) fetcher = fetchWithOriginPause(kv, fetcher);
   try {
     return await collectPackedDay(params, kv, step, fetcher);
   } catch (error) {
     if (params.useStaged) throw error;
-    const result = await collectWis2Day(params.day, kv, step, fetcher);
-    if (result.status === "wis2_unavailable") throw error;
+    let result;
+    try {
+      result = await collectWis2Day(params.day, kv, step, fetcher);
+    } catch (backupError) {
+      throw new Error(error.message + " " + backupError.message, { cause: backupError });
+    }
+    if (result.status === "wis2_unavailable") {
+      throw new Error(error.message + " WIS2 sem medições para " + params.day + ".", { cause: error });
+    }
     return { ...result, primaryError: error.message };
   }
 }

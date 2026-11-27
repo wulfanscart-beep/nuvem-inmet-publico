@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { indexBdmepArchive } from "../src/bdmep-archive.js";
 import { handleRequest } from "../src/http.js";
-import { bdmepKey, compressStation, joinStations, packedKey, portalKey, stagedBdmepKey } from "../src/packed.js";
+import { bdmepKey, compressStation, joinStations, mirrorKey, packedKey, portalKey, stagedBdmepKey } from "../src/packed.js";
 
 const day = "2026-11-24";
 const header = [
@@ -91,7 +91,7 @@ test("consulta o BDMEP apenas quando há lacuna nas horas ou nos campos pedidos 
 
   reads.length = 0;
   const merged = await request("temperature_c,relative_humidity_percent");
-  assert.deepEqual(reads, [packedKey(day), portalKey(day, station), bdmepKey(day)]);
+  assert.deepEqual(reads, [packedKey(day), portalKey(day, station), bdmepKey(day), mirrorKey(day)]);
   assert.equal(merged.headers.get("X-INMET-Source"), "portal");
   assert.equal(merged.headers.get("X-INMET-Observed-Hours"), "24");
   assert.equal(merged.headers.get("X-INMET-Coverage"), "complete");

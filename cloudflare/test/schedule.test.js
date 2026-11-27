@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bdmepKey, packedKey, stagedBdmepKey } from "../src/packed.js";
-import { mailboxState, resumableBdmepSteps, scheduleCollection, scheduleStationTables } from "../src/schedule.js";
+import {
+  mailboxState, resumableBdmepSteps, scheduleCollection, scheduleDirectCollection,
+  scheduleMirrorCollection, scheduleStationTables,
+} from "../src/schedule.js";
 
 const hour = 3_600_000;
 const first = Date.parse("2026-11-25T13:00:00Z");
@@ -41,6 +44,25 @@ function setup() {
   } };
   return { kv, collector, entries, jobs, run: time => scheduleCollection(time, kv, collector) };
 }
+
+test("o espelho agenda uma coleta HTTP por janela e reaproveita o mesmo identificador", async () => {
+  const { collector, jobs } = setup();
+  const first = await scheduleMirrorCollection(morning, collector);
+  assert.equal(first.status, "scheduled");
+  assert.equal(await scheduleMirrorCollection(morning + hour, collector), null);
+  assert.equal((await scheduleMirrorCollection(morning + 8_000, collector)).status, "already_scheduled");
+  assert.deepEqual(jobs, [{ id: first.id, params: { mode: "mirror", slot: "2026-11-26T09" } }]);
+});
+
+test("a recuperação pela origem oficial tem cadência própria e prioriza falhas sem lote definitivo", async () => {
+  const { kv, collector, entries, jobs } = setup();
+  entries.set(bdmepKey("2026-11-24"), { provisional: false });
+  assert.equal(await scheduleDirectCollection(first + 5 * hour, kv, collector), null);
+  const result = await scheduleDirectCollection(first, kv, collector);
+  assert.equal(result.status, "scheduled");
+  assert.equal(result.day, "2026-11-23");
+  assert.equal(jobs[0].params.mode, "direct");
+});
 
 test("uma janela cria só um pedido pelo portal e uma entrega repetida do cron não cria outro", async () => {
   const { run, jobs, entries } = setup();

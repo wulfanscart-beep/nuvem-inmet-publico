@@ -5,9 +5,6 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
   "preview_urls": false,
-  "browser": {
-    "binding": "INMET_BROWSER"
-  },
   "triggers": {
     "crons": [
       "0 * * * *"
@@ -37,12 +34,6 @@
       "concurrency": {
         "limit": 1
       }
-    },
-    {
-      "name": "nuvem-inmet-exemplo-bdmep",
-      "binding": "INMET_BDMEP",
-      "class_name": "InmetBdmepCollection",
-      "script_name": "nuvem-inmet-exemplo-bdmep"
     }
   ]
 }

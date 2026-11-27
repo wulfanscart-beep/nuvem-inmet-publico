@@ -6,7 +6,8 @@ import { fetchWithOriginPause } from "./wis2.js";
 
 const endpoint = "https://agenciasertao.com/tempo/stations-api.php";
 const progressKey = "collect/mirror/v1/progress";
-const stationCode = /^A\d{3}$/;
+const stationCode = /^[A-Z]\d{3}$/;
+const catalogVersion = 2;
 const csvBudget = 24;
 const rollingDays = 8;
 const dayMs = 86_400_000;
@@ -163,7 +164,9 @@ export async function collectMirror(params, kv, step, fetcher = fetch) {
   const days = dateWindow(params.slot);
   const request = fetchWithOriginPause(kv, fetcher);
   const prior = await step.do("ler ponto de retomada do espelho", () => kv.get(progressKey, "json"));
-  const snapshot = await step.do("receber catálogo da Agência Sertão", oneAttempt, () => catalog(request, prior, days));
+  // A cached list from the first version contains only A-prefixed stations.
+  const cached = prior?.catalogVersion === catalogVersion ? prior : null;
+  const snapshot = await step.do("receber catálogo da Agência Sertão", oneAttempt, () => catalog(request, cached, days));
   const byDay = new Map();
   for (const [day, row] of snapshot.rows) addRow(byDay, day, row, true);
 
@@ -207,7 +210,7 @@ export async function collectMirror(params, kv, step, fetcher = fetch) {
   const stored = [];
   for (const [day, rows] of byDay) stored.push(await storeDay(kv, step, day, rows));
   await step.do("guardar ponto de retomada do espelho", () => kv.put(progressKey, JSON.stringify({
-    codes: snapshot.codes, etag: snapshot.etag, observedAt: snapshot.observedAt, cursor,
+    catalogVersion, codes: snapshot.codes, etag: snapshot.etag, observedAt: snapshot.observedAt, cursor,
   })));
   if (errors.length && !stored.length && !stationFiles) {
     throw new Error("Falha na rodada da Agência Sertão: " + errors[0].error);

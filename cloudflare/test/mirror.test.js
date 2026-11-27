@@ -22,7 +22,7 @@ function setup() {
 }
 
 function catalog(tag = '"catalogue"') {
-  const stations = ["A807", "A843", "S721"].map(code => ({
+  const stations = ["A807", "A843", "B806", "F501", "S721"].map(code => ({
     code, entity: code === "S721" ? "PARCEIRO" : "INMET", type: "automaticas",
     csv_url: "csv/automaticas/" + code + ".csv", updated_at: today + "T12:00",
     current: { temperature: 16.4, wind: 0, humidity: 82 }, periods: { "7d": { observations: 100 } },
@@ -51,7 +51,7 @@ test("indexa o país pelo catálogo e completa a série horária pelo CSV da mes
     const file = new URL(url).searchParams.get("path");
     return file === "catalogo.json" ? catalog() : stationFile("A807");
   });
-  assert.equal(result.catalogStations, 2);
+  assert.equal(result.catalogStations, 4);
   assert.equal(result.stationFiles, 1);
   const yesterdayResponse = await read("A807", yesterday);
   assert.equal(yesterdayResponse.headers.get("X-INMET-Source"), "agencia-sertao");
@@ -62,6 +62,34 @@ test("indexa o país pelo catálogo e completa a série horária pelo CSV da mes
   assert.equal(todayRows[13].recorded, false);
   assert.equal((await (await read("A843", today)).json())[12].temperature_c, "16.4");
   assert.equal((await read("S721", today)).status, 404);
+});
+
+test("atualiza o catálogo antigo e indexa B e F mantendo o cursor da rotação", async () => {
+  const { kv, read } = setup();
+  const key = "collect/mirror/v1/progress";
+  await kv.put(key, JSON.stringify({ codes: ["A807", "A843"], cursor: "A807", etag: '"catalogue"' }));
+  const sample = ["B806", "F501"];
+  const first = await collectMirror({ ...params, sample }, kv, step, async (url, options) => {
+    const file = new URL(url).searchParams.get("path");
+    if (file === "catalogo.json") {
+      assert.equal(options.headers["If-None-Match"], undefined);
+      return catalog();
+    }
+    return stationFile(file.split("/").at(-1).slice(0, -4));
+  });
+  assert.equal(first.stationFiles, 2);
+  assert.equal((await kv.get(key, "json")).cursor, "A807");
+  for (const code of sample) {
+    const records = await (await read(code, yesterday)).json();
+    assert.equal(records[23].wind_gust_m_s, "8.70");
+  }
+  const next = await collectMirror({ ...params, sample: ["F501"] }, kv, step, async (url, options) => {
+    if (new URL(url).searchParams.get("path") !== "catalogo.json") return stationFile("F501");
+    assert.equal(options.headers["If-None-Match"], '"catalogue"');
+    return new Response(null, { status: 304 });
+  });
+  assert.equal(next.catalogStations, 4);
+  assert.equal(next.snapshotHours, 0);
 });
 
 test("limite do provedor interrompe a rodada e preserva a precisão recebida em CSV", async () => {

@@ -54,7 +54,11 @@ O Cron verifica janelas de cinco horas corridas contadas a partir de
 conferência WIS2. Ambas usam identificadores por janela que impedem duplicatas.
 O Worker consulta por HTTPS o catálogo nacional do Portal Tempo da Agência
 Sertão, que republica observações do INMET. O catálogo traz a última medição
-disponível por estação. O sistema lê, em ordem rotativa, até 24 CSVs públicos
+disponível por estação. Entram na rotação as estações automáticas identificadas
+no catálogo como pertencentes ao INMET, com série nos últimos sete dias e
+CSV da própria estação. Isso inclui os códigos com prefixo `B` e `F`, além de
+`A`. A primeira execução após a ampliação relê o catálogo e preserva o
+ponto de retomada. O sistema lê, em ordem rotativa, até 24 CSVs públicos
 por janela para completar a série horária dos oito dias UTC mais recentes.
 As consultas dos CSVs são seriais, com quatro segundos entre elas.
 [Estações do Portal Tempo](https://agenciasertao.com/tempo/estacoes/) · [Metodologia do Portal Tempo](https://agenciasertao.com/tempo/metodologia/)

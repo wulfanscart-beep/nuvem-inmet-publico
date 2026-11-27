@@ -1,6 +1,6 @@
 import { collectPackedDay, joinPartitions, packPartition, partitions } from "./collect.js";
 import { fieldPositions, fields } from "./fields.js";
-import { wis2Key } from "./packed.js";
+import { compressStation, compressedStations, joinStations, readPackedStation, wis2Key } from "./packed.js";
 import stations from "./wis2-stations.json" with { type: "json" };
 
 const endpoint = "https://wis2bra.inmet.gov.br/oapi/collections/urn:wmo:md:br-inmet:synop/items";
@@ -23,6 +23,8 @@ const rules = new Map([
   ["maximum_temperature_at_height_and_over_period_specified", ["temperature_max_c", "Celsius", 60]],
   ["minimum_temperature_at_height_and_over_period_specified", ["temperature_min_c", "Celsius", 60]],
 ].map(([source, [name, unit, minutes]]) => [source, [fieldPositions.get(name) + 1, unit, minutes]]));
+
+export const wis2FieldPositions = [...rules.values()].map(([position]) => position - 1);
 
 export function fetchWithOriginPause(kv, fetcher) {
   const pauses = new Map();
@@ -84,9 +86,9 @@ async function readWis2(params, fetcher) {
   }
 }
 
-async function findCoverage(day, fetcher) {
+export async function latestWis2Report(start, end, fetcher) {
   const text = await readWis2({
-    f: "json", datetime: day + "T00:00:00Z/" + day + "T23:59:59Z",
+    f: "json", datetime: start + "/" + end,
     limit: "1", properties: "reportTime", sortby: "-reportTime",
   }, fetcher);
   const { features, numberMatched } = JSON.parse(text);
@@ -95,11 +97,11 @@ async function findCoverage(day, fetcher) {
   }
   if (numberMatched === 0 && features.length === 0) return null;
   const last = features[0]?.properties?.reportTime;
-  if (typeof last !== "string" || !last.startsWith(day)
+  if (!numberMatched || typeof last !== "string" || last < start || last > end
       || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):00:00Z$/.test(last)) {
     throw new Error("Horário de cobertura do WIS2 inválido.");
   }
-  return { throughHour: Number(last.slice(11, 13)), sourceCount: numberMatched };
+  return { last, sourceCount: numberMatched };
 }
 
 function hourPeriods(day, hour) {
@@ -142,6 +144,21 @@ function readPart(csv, start, hour, periods) {
   return { next, count, rows: [...stationsInPart.values()] };
 }
 
+async function retainPriorReadings(day, buffer, prior) {
+  const blocks = new Map(compressedStations(buffer, day));
+  for (const code of blocks.keys()) {
+    const old = await readPackedStation(prior, day, code);
+    if (!old.size) continue;
+    const current = await readPackedStation(buffer, day, code);
+    for (const [hour, row] of old) {
+      const next = current.get(hour);
+      current.set(hour, next ? next.map((value, i) => value ?? row[i]) : row);
+    }
+    blocks.set(code, await compressStation([...current.values()].sort((a, b) => a[0] - b[0])));
+  }
+  return joinStations(day, blocks);
+}
+
 export async function collectWis2Day(day, kv, step, fetcher = fetch) {
   const key = wis2Key(day);
   const prior = await step.do("conferir lote WIS2", async () => {
@@ -149,10 +166,19 @@ export async function collectWis2Day(day, kv, step, fetcher = fetch) {
     if (value) await value.cancel();
     return metadata;
   });
-  const coverage = await step.do("consultar cobertura WIS2", oneAttempt, () => findCoverage(day, fetcher));
+  const coverage = await step.do("consultar cobertura WIS2", oneAttempt, async () => {
+    const report = await latestWis2Report(day + "T00:00:00Z", day + "T23:59:59Z", fetcher);
+    return report && { throughHour: Number(report.last.slice(11, 13)), sourceCount: report.sourceCount };
+  });
   if (!coverage || (prior && prior.sourceCount >= coverage.sourceCount && prior.throughHour >= coverage.throughHour)) {
-    return { ...prior, day, status: prior ? "wis2_already_stored" : "wis2_unavailable" };
+    return { ...prior, day, status: prior ? "wis2_already_stored" : "wis2_unavailable", sourceAvailable: Boolean(coverage) };
   }
+  let previous;
+  const loadPrevious = async () => {
+    previous ??= await kv.get(key, "arrayBuffer");
+    if (!previous) throw new Error("Lote anterior do WIS2 indisponível durante a atualização.");
+    return previous;
+  };
 
   const groups = Array.from({ length: partitions }, () => []);
   const hours = [];
@@ -183,20 +209,29 @@ export async function collectWis2Day(day, kv, step, fetcher = fetch) {
     if (lines >= pageLimit) throw new Error("CSV horário do WIS2 atingiu o limite de linhas.");
     if (hasRows) hours.push(hour);
   }
-  if (!hours.length || (prior && prior.hours.some(hour => !hours.includes(hour)))) {
-    return { ...prior, day, status: prior ? "wis2_already_stored" : "wis2_unavailable" };
+  if (!hours.length) {
+    return { ...prior, day, status: prior ? "wis2_already_stored" : "wis2_unavailable", sourceAvailable: false };
   }
 
   const buffers = [];
   for (const [partition, rows] of groups.entries()) {
     if (rows.length) {
-      buffers.push(await step.do("compactar WIS2 grupo " + partition, () => packPartition(day, rows, true)));
+      buffers.push(await step.do("compactar WIS2 grupo " + partition, async () => {
+        const change = await packPartition(day, rows, true);
+        return prior ? retainPriorReadings(day, change, await loadPrevious()) : change;
+      }));
     }
   }
   return step.do("publicar contingência WIS2", async () => {
-    const { packed, stations } = joinPartitions(day, buffers);
-    if (prior && stations < prior.stations) return { ...prior, day, status: "wis2_already_stored" };
-    const metadata = { ...coverage, hours, stations, bytes: packed.byteLength };
+    let { packed, stations } = joinPartitions(day, buffers);
+    if (prior) {
+      const all = new Map(compressedStations(await loadPrevious(), day));
+      for (const [code, block] of compressedStations(packed, day)) all.set(code, block);
+      packed = joinStations(day, all);
+      stations = all.size;
+    }
+    const savedHours = [...new Set([...(prior?.hours ?? []), ...hours])].sort((a, b) => a - b);
+    const metadata = { ...coverage, hours: savedHours, stations, bytes: packed.byteLength };
     await kv.put(key, packed, { metadata });
     return { ...metadata, day, status: "wis2_stored" };
   });

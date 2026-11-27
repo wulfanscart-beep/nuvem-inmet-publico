@@ -26,10 +26,10 @@ function dateWindow(slot) {
     new Date(time - offset * dayMs).toISOString().slice(0, 10)));
 }
 
-async function readBytes(response, limit) {
+export async function readBytes(response, limit) {
   if (!response.body || Number(response.headers.get("Content-Length")) > limit) {
     await response.body?.cancel().catch(() => {});
-    throw new Error("Corpo do espelho ausente ou acima do limite.");
+    throw new Error("Corpo da resposta ausente ou acima do limite.");
   }
   const reader = response.body.getReader();
   const chunks = [];
@@ -39,7 +39,7 @@ async function readBytes(response, limit) {
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > limit) throw new Error("Corpo do espelho acima do limite.");
+      if (bytes > limit) throw new Error("Corpo da resposta acima do limite.");
       chunks.push(value);
     }
   } catch (error) {

@@ -2,8 +2,10 @@
 
 O Nuvem-INMET reúne observações horárias das estações automáticas do Brasil.
 O Worker consulta por HTTP o Portal Tempo da Agência Sertão, que republica
-as medições do INMET. Os lotes oficiais também são usados na recuperação
-das lacunas. [Operação, implantação e consultas](cloudflare/README.md)
+as medições do INMET. A cada cinco horas, um checador no Cloudflare compara
+o espelho com as observações oficiais do WIS2 e recupera lacunas dos últimos
+30 dias. A consulta por estação e data aceita `fallback=wis2` para incluir
+esses registros. [Operação, implantação e consultas](cloudflare/README.md#checagem-no-backend)
 
 ## Acervo Python local
 

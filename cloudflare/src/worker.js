@@ -1,5 +1,5 @@
 import { handleRequest } from "./http.js";
-import { scheduleDirectCollection, scheduleMirrorCollection } from "./schedule.js";
+import { scheduleDirectCollection, scheduleMirrorCollection, scheduleWis2Check } from "./schedule.js";
 
 export { InmetDailyCollection } from "./workflow.js";
 
@@ -10,6 +10,7 @@ export default {
     const jobs = await Promise.allSettled([
       scheduleMirrorCollection(event.scheduledTime, env.INMET_COLLECTOR),
       scheduleDirectCollection(event.scheduledTime, env.INMET_DAYS, env.INMET_COLLECTOR),
+      scheduleWis2Check(event.scheduledTime, env.INMET_COLLECTOR),
     ]);
     for (const job of jobs) {
       if (job.status === "fulfilled" && job.value) {

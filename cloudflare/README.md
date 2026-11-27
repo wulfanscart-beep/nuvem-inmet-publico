@@ -16,7 +16,7 @@ por exemplo `A807` para Curitiba, e uma data no formato `AAAA-MM-DD`.
 | `GET /v1/observations?station=A807&date=2026-01-01` | Temperatura e umidade em JSON |
 | `GET /v1/observations?station=A807&date=2026-01-01&fields=all` | As 17 variáveis em JSON |
 | `GET /v1/observations?station=A807&date=2026-11-24&fields=all` | Consulta de uma estação do lote nacional recebido pelo BDMEP |
-| `GET /v1/observations?station=A843&date=2026-11-23&fallback=wis2` | Contingência WIS2 quando falta uma observação oficial indexada |
+| `GET /v1/observations?station=A843&date=2026-11-09&fields=all&fallback=wis2` | Horas e campos disponíveis no WIS2 para completar o índice |
 
 O parâmetro `fields` aceita nomes separados por vírgula, na ordem desejada.
 Use `format=csv` para obter as mesmas linhas em CSV.
@@ -40,14 +40,18 @@ do espelho, `X-INMET-Source` indica `agencia-sertao`. Quando o espelho
 complementa uma resposta do portal ou do BDMEP, o cabeçalho
 `X-INMET-Supplement` identifica seu uso. `X-INMET-Coverage` e
 `X-INMET-Observed-Hours` descrevem a cobertura horária da estação.
-Consumidores que aceitam a contingência WIS2 podem usar `fallback=wis2`.
+Com `fallback=wis2`, a API preenche campos e horas ausentes com as medições
+WIS2 já indexadas. O cabeçalho `X-INMET-Source` identifica o WIS2 quando
+ele é a única fonte. Quando ele complementa outra fonte, aparece em
+`X-INMET-Supplement`. As leituras dos clientes usam apenas o índice local do Worker.
 
 [Catálogo da API](http://127.0.0.1:8787/v1/fields) · [Fonte INMET](https://portal.inmet.gov.br/dadoshistoricos)
 
 ## Coleta e armazenamento
 
 O Cron verifica janelas de cinco horas corridas contadas a partir de
-25/11/2026 às 13h UTC. Cada janela cria apenas uma instância do espelho.
+25/11/2026 às 13h UTC. Cada janela agenda uma coleta do espelho e uma
+conferência WIS2. Ambas usam identificadores por janela que impedem duplicatas.
 O Worker consulta por HTTPS o catálogo nacional do Portal Tempo da Agência
 Sertão, que republica observações do INMET. O catálogo traz a última medição
 disponível por estação. O sistema lê, em ordem rotativa, até 24 CSVs públicos
@@ -79,6 +83,44 @@ O indexador independente do BDMEP continua disponível para quem configurar
 a importação pelo portal. As tabelas e os arquivos nacionais já indexados
 permanecem consultáveis pelo mesmo contrato.
 [Portal oficial BDMEP](https://bdmep.inmet.gov.br/)
+
+## Checagem no backend
+
+O Workflow `inmet-checagem-AAAA-MM-DDTHH` consulta a hora de medição mais
+recente publicada na coleção SYNOP do INMET. Escolhe até um dia por rodada,
+alternando a conferência da publicação recente e a recuperação dos dias sem
+lote nacional definitivo nos últimos 30 dias. O cursor avança mesmo se uma
+data antiga estiver sem medições. Um lote WIS2 já gravado é reaproveitado
+quando o limite horário e a contagem da fonte não aumentam.
+
+O resultado em `collect/wis2/v1/checks/<janela>` fica no KV por 45 dias.
+`latest` é o horário UTC publicado pelo INMET e `day` é o dia examinado.
+`audit` compara as estações que aparecem nas duas fontes, hora a hora, nos
+dez campos WIS2 mapeados. Os contadores separam valores iguais, diferentes
+e presentes em uma única fonte. Até três divergências ficam identificadas
+por estação, hora, variável e valores. Com zero estações em comum, a
+rodada pode recuperar dados, mas a comparação fica sem amostra.
+O status `cached_only` identifica uma conferência usando o lote preservado.
+Erros da origem ficam no registro da janela e no histórico do Workflow.
+[Coleção de observações do INMET](https://wis2bra.inmet.gov.br/oapi/collections/urn:wmo:md:br-inmet:synop)
+
+A Agência Sertão serve um catálogo, arquivos JSON por estação e CSVs horários.
+Ela atribui o histórico ao INMET/BDMEP. A página municipal usa uma cópia
+local da medição e prevê a consulta direta ao INMET por código IBGE em
+`https://apiprevmet3.inmet.gov.br/estacao/proxima/{IBGE}`. A origem de cada
+CSV no processo interno da Agência não está documentada nesses materiais.
+[Metodologia](https://agenciasertao.com/tempo/metodologia/) · [Acervo da A843](https://agenciasertao.com/tempo/estacao-a843/) · [Código publicado pela Agência](https://agenciasertao.com/tempo/tempo-ensemble-portal.js?v=20261124)
+
+Para conferir uma localidade pelo backend, inicie o modo administrativo
+`nearby-check` do Workflow. O exemplo consulta Dois Vizinhos (PR).
+O resultado traz o código da estação devolvida, a hora UTC, as medições e a
+comparação dessa hora com o espelho já indexado. Esse modo usa uma requisição
+ao INMET por acionamento, respeita a pausa da origem e grava o resultado no
+histórico da execução. O horário de medição informa a atualidade do retorno.
+
+```bash
+npx wrangler workflows trigger nuvem-inmet-exemplo-daily '{"mode":"nearby-check","municipality":"4107207"}'
+```
 
 ## Verificação do protocolo
 

@@ -88,6 +88,15 @@ const runtime = new Miniflare(convertV4MiniflareOptions({ workers: [
     kvNamespaces: { INMET_DAYS: "kv-http-isolado" }, workflows: { INMET_COLLECTOR: mirrorBinding },
     async outboundService(req) {
       const url = new URL(req.url);
+      if (url.hostname === "wis2bra.inmet.gov.br") {
+        const time = tableDay + "T00:00:00Z";
+        if (url.searchParams.get("f") === "json") {
+          return Response.json({ numberMatched: 1, features: [{ properties: { reportTime: time } }] });
+        }
+        return new Response("wigos_station_identifier,name,phenomenonTime,value,units\n"
+          + "0-76-0-4107207000000178,air_temperature," + time + ",19.4,Celsius\n",
+          { headers: { "Content-Type": "text/csv" } });
+      }
       assert.equal(url.origin, "https://agenciasertao.com");
       const path = url.searchParams.get("path");
       mirrorRequests.push(path);
@@ -161,6 +170,14 @@ try {
   assert.equal(result.status, 200);
   assert.equal(result.headers.get("X-INMET-Source"), "agencia-sertao");
   assert.equal((await result.json())[23].wind_gust_m_s, "14.0");
+  const checked = await waitFor("inmet-checagem-" + slot, s => s.status === "complete", httpWorkflow);
+  assert.equal(checked.s.output.status, "checked");
+  assert.equal(checked.s.output.audit.wis2Stations, 1);
+  const verified = await direct.fetch("http://consulta.test/v1/observations?station=A843&date=" + tableDay + "&fields=all&fallback=wis2");
+  assert.equal(verified.headers.get("X-INMET-Supplement"), "wis2");
+  const checkedRows = await verified.json();
+  assert.equal(checkedRows[0].temperature_c, "19.4");
+  assert.equal(checkedRows[23].wind_gust_m_s, "14.0");
   // Seed only the catalogue and the previous checkpoint; the cron must index both missing stations.
   const previous = {
     id: "tabelas-bancada-anterior", day: tableDay, status: "partial",

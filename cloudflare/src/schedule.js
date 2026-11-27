@@ -67,7 +67,7 @@ export async function scheduleCollection(scheduledTime, kv, collector) {
   return { slot, day, provisional, indexOnly, id, status: created.length ? "scheduled" : "already_scheduled" };
 }
 
-async function publishedDays(kv, days) {
+export async function publishedDays(kv, days) {
   const months = new Set(days.map(day => day.slice(0, 7)));
   const published = new Map();
   const prefixes = [...months].flatMap(month => [packedPrefix + month + "-", bdmepPrefix + month + "-"]);
@@ -111,6 +111,12 @@ export async function scheduleMirrorCollection(scheduledTime, collector) {
   const slot = collectionSlot(scheduledTime);
   if (!slot) return null;
   return dispatchCollection(collector, "inmet-espelho-" + slot, { mode: "mirror", slot });
+}
+
+export async function scheduleWis2Check(scheduledTime, collector) {
+  const slot = collectionSlot(scheduledTime);
+  if (!slot) return null;
+  return dispatchCollection(collector, "inmet-checagem-" + slot, { mode: "wis2-check", slot });
 }
 
 async function dispatchCollection(collector, id, params) {

@@ -101,6 +101,16 @@ function fillMissing(hours, reports) {
   return hours;
 }
 
+function addsReadings(hours, reports, selected) {
+  return [...reports].some(([hour, row]) => {
+    const known = hours?.get(hour);
+    return !known || selected.some(name => {
+      const column = fieldPositions.get(name);
+      return known[column] == null && row[column] != null;
+    });
+  });
+}
+
 export async function handleRequest(request, env) {
   const url = new URL(request.url);
   if (!['/health', '/v1/observations', '/v1/fields'].includes(url.pathname)) {
@@ -178,14 +188,7 @@ export async function handleRequest(request, env) {
       if (mirror !== null) {
         officialDayExists = true;
         const reports = await readPackedStation(mirror, day, station);
-        const improves = [...reports].some(([hour, row]) => {
-          const known = hours?.get(hour);
-          return !known || selected.some(name => {
-            const position = fieldPositions.get(name);
-            return known[position] === null && row[position] !== null;
-          });
-        });
-        if (improves) {
+        if (addsReadings(hours, reports, selected)) {
           hours = fillMissing(hours, reports);
           headers = coverageHeaders(from ?? 'agencia-sertao', hours, hours.size === 24 ? 'complete' : 'partial');
           if (from) {
@@ -195,11 +198,23 @@ export async function handleRequest(request, env) {
         }
       }
     }
-    if (hours === null && env?.INMET_DAYS && url.searchParams.get('fallback') === 'wis2') {
+    if (env?.INMET_DAYS && url.searchParams.get('fallback') === 'wis2' && missingValues(hours, selected)) {
       const fallback = await env.INMET_DAYS.get(wis2Key(day), 'arrayBuffer');
       if (fallback !== null) {
-        hours = await readPackedStation(fallback, day, station);
-        headers = coverageHeaders('wis2', hours);
+        officialDayExists = true;
+        const reports = await readPackedStation(fallback, day, station);
+        if (addsReadings(hours, reports, selected)) {
+          const hasPrimary = Boolean(hours?.size);
+          hours = fillMissing(hours, reports);
+          if (hasPrimary) {
+            const priorSupplement = headers?.['X-INMET-Supplement'];
+            headers = coverageHeaders(headers?.['X-INMET-Source'] ?? 'inmet', hours, hours.size === 24 ? 'complete' : 'partial');
+            headers['X-INMET-Supplement'] = priorSupplement ? priorSupplement + ', wis2' : 'wis2';
+            headers['Access-Control-Expose-Headers'] += ', X-INMET-Supplement';
+          } else {
+            headers = coverageHeaders('wis2', hours);
+          }
+        }
       }
     }
   } catch {
